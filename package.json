@@ -1,0 +1,47 @@
+{
+  "name": "story-to-screen-studio",
+  "productName": "StoryForge AI 短剧工坊",
+  "private": true,
+  "version": "0.6.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "start": "vite --host 0.0.0.0",
+    "desktop": "npm run build && electron .",
+    "desktop:pack": "npm run build && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest",
+    "vite": "latest"
+  },
+  "build": {
+    "appId": "com.storyforge.desktop",
+    "productName": "StoryForge AI 短剧工坊",
+    "directories": {
+      "output": "release-v0.6"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "StoryForge-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "StoryForge AI 短剧工坊"
+    }
+  }
+}
