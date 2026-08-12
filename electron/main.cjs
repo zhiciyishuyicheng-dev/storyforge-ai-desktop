@@ -55,6 +55,7 @@ function validateWorkflow(data) {
   const characters = data?.analysis?.characters;
   const scenes = data?.script?.scenes;
   const shots = data?.storyboard?.shots;
+  const assets = data?.assets;
   if (!Array.isArray(characters) || !characters.length) throw new Error('DeepSeek 未返回有效人物列表，请重试。');
   if (!Array.isArray(scenes) || !scenes.length) throw new Error('DeepSeek 未返回有效剧本场次，请重试。');
   if (!Array.isArray(shots) || shots.length < 3) throw new Error('DeepSeek 返回的分镜数量不足，请重试。');
@@ -63,6 +64,15 @@ function validateWorkflow(data) {
     const withoutRefs = String(shot.prompt).replace(/@(Image|Video|Audio)\d+/g, '');
     if (/[A-Za-z]{2,}/.test(withoutRefs)) throw new Error(`镜头 ${shot.no || ''} 含有中英文混排，已拒绝本次结果，请重新生成。`);
   }
+  if (!assets?.overviewBoard?.prompt) throw new Error('DeepSeek 未返回九宫格制作参考板提示词，请重试。');
+  if (!Array.isArray(assets.characterChecklist) || !assets.characterChecklist.length) throw new Error('DeepSeek 未返回人物三视图生成清单，请重试。');
+  if (!Array.isArray(assets.characterDifferenceMatrix) || !assets.characterDifferenceMatrix.length) throw new Error('DeepSeek 未返回人物差异化视觉锚点矩阵，请重试。');
+  if (!Array.isArray(assets.characters) || assets.characters.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的人物参考图提示词不完整，请重试。');
+  const requiredCharacters = assets.characterChecklist.filter((item) => item.requiresTurnaround).map((item) => String(item.name || '').trim()).filter(Boolean);
+  const renderedCharacters = new Set(assets.characters.map((item) => String(item.name || '').trim()));
+  if (requiredCharacters.some((name) => !renderedCharacters.has(name))) throw new Error('DeepSeek 漏掉了需要单独三视图的重要人物，请重试。');
+  if (!Array.isArray(assets.scenes) || !assets.scenes.length || assets.scenes.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的场景参考图提示词不完整，请重试。');
+  if (!Array.isArray(assets.props) || assets.props.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的道具参考图提示词不完整，请重试。');
 }
 
 ipcMain.handle('deepseek:get-status', () => ({ configured: Boolean(readStoredKey()), model: MODEL }));

@@ -1,6 +1,8 @@
 import './style.css';
 
-const STORAGE_KEY = 'storyforge-project-v1';
+const LEGACY_STORAGE_KEY = 'storyforge-project-v1';
+const LIBRARY_STORAGE_KEY = 'storyforge-project-library-v1';
+const LIBRARY_SCHEMA_VERSION = 1;
 const SCHEMA_VERSION = 5;
 
 const steps = [
@@ -16,6 +18,7 @@ const demoScript = `第1集 失控的婚礼\n\n苏晚在婚礼现场等了两个
 
 const defaultProject = {
   schemaVersion: SCHEMA_VERSION,
+  id: '',
   title: '未命名短剧项目',
   script: '',
   activeStep: 'analysis',
@@ -23,34 +26,87 @@ const defaultProject = {
   outputs: {},
   seedanceMaterials: { images: 3, videos: 0, audios: 0 },
   running: false,
+  createdAt: null,
   updatedAt: null,
 };
 
-let project = loadProject();
+let projectLibrary = loadProjectLibrary();
+let project = getActiveProject();
 let toastTimer;
 let generationRun = 0;
 let deepseekStatus = { configured: false, model: 'deepseek-v4-pro', checking: true };
 
-function loadProject() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    const migrated = { ...defaultProject, ...saved };
-    if (saved?.schemaVersion !== SCHEMA_VERSION) {
-      migrated.outputs = {};
-      migrated.completed = [];
-      migrated.activeStep = 'analysis';
-      migrated.running = false;
-      delete migrated.aiGeneration;
-      migrated.schemaVersion = SCHEMA_VERSION;
-    }
-    return migrated;
+function createProject(overrides = {}) {
+  const now = new Date().toISOString();
+  return {
+    ...defaultProject,
+    seedanceMaterials: { ...defaultProject.seedanceMaterials },
+    ...overrides,
+    id: overrides.id || createProjectId(),
+    createdAt: overrides.createdAt || now,
+    updatedAt: overrides.updatedAt || null,
+    running: false,
+  };
+}
+
+function createProjectId() {
+  return globalThis.crypto?.randomUUID?.() || `project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeProject(saved) {
+  const migrated = createProject(saved && typeof saved === 'object' ? saved : {});
+  migrated.completed = Array.isArray(saved?.completed) ? saved.completed.filter((id) => steps.some((step) => step.id === id)) : [];
+  migrated.outputs = saved?.outputs && typeof saved.outputs === 'object' ? saved.outputs : {};
+  migrated.seedanceMaterials = { ...defaultProject.seedanceMaterials, ...(saved?.seedanceMaterials || {}) };
+  if (saved?.schemaVersion !== SCHEMA_VERSION) {
+    migrated.outputs = {};
+    migrated.completed = [];
+    migrated.activeStep = 'analysis';
+    delete migrated.aiGeneration;
   }
-  catch { return { ...defaultProject }; }
+  migrated.schemaVersion = SCHEMA_VERSION;
+  migrated.running = false;
+  return migrated;
+}
+
+function loadProjectLibrary() {
+  try {
+    const savedLibrary = JSON.parse(localStorage.getItem(LIBRARY_STORAGE_KEY));
+    if (savedLibrary && Array.isArray(savedLibrary.projects) && savedLibrary.projects.length) {
+      const projects = savedLibrary.projects.map(normalizeProject);
+      const activeProjectId = projects.some((item) => item.id === savedLibrary.activeProjectId)
+        ? savedLibrary.activeProjectId
+        : projects[0].id;
+      return { schemaVersion: LIBRARY_SCHEMA_VERSION, activeProjectId, projects };
+    }
+  }
+  catch { /* Try the legacy single-project storage below. */ }
+
+  let firstProject;
+  try {
+    const legacyProject = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY));
+    firstProject = normalizeProject(legacyProject);
+  } catch { firstProject = createProject(); }
+  const library = { schemaVersion: LIBRARY_SCHEMA_VERSION, activeProjectId: firstProject.id, projects: [firstProject] };
+  localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(library));
+  return library;
+}
+
+function getActiveProject() {
+  return projectLibrary.projects.find((item) => item.id === projectLibrary.activeProjectId) || projectLibrary.projects[0];
+}
+
+function saveProjectLibrary() {
+  localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(projectLibrary));
 }
 
 function saveProject() {
   project.updatedAt = new Date().toISOString();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
+  const index = projectLibrary.projects.findIndex((item) => item.id === project.id);
+  if (index >= 0) projectLibrary.projects[index] = project;
+  else projectLibrary.projects.push(project);
+  projectLibrary.activeProjectId = project.id;
+  saveProjectLibrary();
 }
 
 function esc(value = '') {
@@ -58,6 +114,16 @@ function esc(value = '') {
 }
 
 function currentIndex() { return steps.findIndex((step) => step.id === project.activeStep); }
+
+function projectListTemplate() {
+  return [...projectLibrary.projects]
+    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))
+    .map((item) => {
+      const selected = item.id === project.id;
+      return `<div class="project-row ${selected ? 'selected' : ''}"><button class="project-item ${selected ? 'selected' : ''}" data-project-id="${esc(item.id)}" title="切换到 ${esc(item.title)}"><span class="project-dot"></span><span class="project-name">${esc(item.title)}</span></button>${projectLibrary.projects.length > 1 ? `<button class="delete-project" data-delete-project-id="${esc(item.id)}" title="删除 ${esc(item.title)}" aria-label="删除 ${esc(item.title)}">×</button>` : ''}</div>`;
+    })
+    .join('');
+}
 
 function appTemplate() {
   const progress = Math.round((project.completed.length / steps.length) * 100);
@@ -70,32 +136,29 @@ function appTemplate() {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand"><span class="brand-mark">✦</span><span>story<span class="brand-accent">forge</span></span></div>
-        <button class="new-project" id="newProject"><span>＋</span> 新建项目 <kbd>⌘ N</kbd></button>
-        <div class="side-label">我的项目 <span>⌁</span></div>
+        <button class="new-project" id="newProject"><span>＋</span> 新建项目 <kbd>Ctrl N</kbd></button>
+        <div class="side-label">我的项目 <span>${projectLibrary.projects.length}</span></div>
         <div class="project-list">
-          <button class="project-item selected"><span class="project-dot"></span><span class="project-name">${esc(project.title)}</span><span class="more">•••</span></button>
-          <button class="project-item muted"><span class="project-dot"></span><span>灵感收集</span></button>
+          ${projectListTemplate()}
         </div>
+        <nav class="sidebar-workflow" aria-label="制作流程">
+          <div class="sidebar-workflow-head"><span>制作流程</span><b>${progress}%</b></div>
+          <div class="sidebar-progress"><i style="width:${Math.max(4, progress)}%"></i></div>
+          <div class="steps">${steps.map(stepTemplate).join('')}</div>
+        </nav>
+        <section class="sidebar-editor" aria-label="剧本入口">
+          <div class="sidebar-editor-head"><div><span class="section-kicker">INPUT</span><h2>剧本入口</h2></div><span class="format-label">TXT · MD</span></div>
+          <div class="script-input-wrap ${project.script ? 'has-content' : ''}"><textarea id="scriptInput" placeholder="把小说改编后的剧本粘贴到这里...\n\n建议包含：集数、场景、人物和对白。${project.script ? '' : '\n\n还没有剧本？试试下方示例。'}">${esc(project.script)}</textarea><div class="textarea-footer"><span>${project.script.length ? `${project.script.length} 字` : '0 字'}</span><label class="upload-link" for="fileInput">↑ 导入文件</label><input type="file" id="fileInput" accept=".txt,.md" hidden /></div></div>
+          <div class="sidebar-input-actions"><button class="sample-link" id="useDemo">加载示例 <span>↗</span></button><button class="primary-button" id="startGenerate" ${project.running ? 'disabled' : ''}><span class="sparkle">✦</span> ${generateLabel} <span>→</span></button></div>
+          <p class="auto-flow-note">前五步自动完成，视频生成手动开始</p>
+        </section>
         <div class="sidebar-bottom">
-          <div class="usage"><div class="usage-head"><span>本月生成额度</span><b>68%</b></div><div class="usage-bar"><i style="width:68%"></i></div><small>还剩 32 次生成</small></div>
           <button class="account" id="openSettings"><div class="avatar">深</div><div><b>DeepSeek V4 Pro</b><small>${deepseekStatus.configured ? '模型已连接' : '需要配置 API Key'}</small></div><span class="settings">⚙</span></button>
         </div>
       </aside>
       <main class="main">
         <header class="topbar"><div class="breadcrumbs"><span>工作台</span><i>/</i><b>${esc(project.title)}</b></div><div class="top-actions"><span class="saved"><span class="saved-dot"></span> 已自动保存</span><button class="icon-button" title="字体缩放：Ctrl + / Ctrl - / Ctrl 0">A</button><button class="transfer-button" id="importProject">导入项目</button><button class="export-button" id="exportProject">导出项目 <span>↓</span></button><input type="file" id="projectFileInput" accept=".json,application/json" hidden /></div></header>
         <section class="hero"><div><div class="eyebrow">AI SHORT DRAMA STUDIO</div><h1>把故事，变成一部短剧。</h1><p>视频生成前五个阶段全部由 DeepSeek V4 Pro 完成，分镜严格遵循即梦二点零提示词规范。</p></div><div class="hero-meta"><button class="status-pill model-status ${deepseekStatus.configured ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${deepseekStatus.checking ? '正在检查模型' : deepseekStatus.configured ? 'DeepSeek V4 Pro 已连接' : '点击配置 DeepSeek'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
-        <section class="workspace-grid">
-          <div class="workflow-card card">
-            <div class="card-head"><div><span class="section-kicker">WORKFLOW</span><h2>制作流程</h2></div><div class="progress-wrap"><span>${progress}% 完成</span><div class="progress-line"><i style="width:${Math.max(4, progress)}%"></i></div></div></div>
-            <div class="steps">${steps.map(stepTemplate).join('')}</div>
-            <div class="tip"><span class="tip-icon">✦</span><span><b>自动流程</b>　视频生成前的阶段会自动确认并继续，视频生成仍由你手动开始。</span><button id="dismissTip">知道了</button></div>
-          </div>
-          <div class="editor-card card">
-            <div class="card-head editor-head"><div><span class="section-kicker">INPUT</span><h2>剧本入口</h2></div><span class="format-label">支持 TXT · DOCX · PDF</span></div>
-            <div class="script-input-wrap ${project.script ? 'has-content' : ''}"><textarea id="scriptInput" placeholder="把小说改编后的剧本粘贴到这里...\n\n建议包含：集数、场景、人物和对白。${project.script ? '' : '\n\n还没有剧本？试试右下角的示例。'}">${esc(project.script)}</textarea><div class="textarea-footer"><span>${project.script.length ? `${project.script.length} 字` : '0 字'}</span><label class="upload-link" for="fileInput">↑ 导入文件</label><input type="file" id="fileInput" accept=".txt,.md" hidden /></div></div>
-            <div class="input-actions"><button class="sample-link" id="useDemo">加载示例剧本 <span>↗</span></button><button class="primary-button" id="startGenerate" ${project.running ? 'disabled' : ''}><span class="sparkle">✦</span> ${generateLabel} <span>→</span></button></div>
-          </div>
-        </section>
         <section class="output-card card"><div class="card-head output-head"><div><span class="section-kicker">OUTPUT</span><h2>生成结果</h2></div><div class="output-tools"><button class="small-button" id="clearOutput">清空结果</button><button class="small-button" id="copyOutput">复制当前结果</button></div></div><div id="outputArea">${outputTemplate()}</div></section>
       </main>
       <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4 Pro</b><small>视频生成前的故事分析、分集大纲、剧本、分镜和视觉素材全部使用此模型。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
@@ -336,7 +399,9 @@ function bindEvents() {
   document.querySelector('#emptyStart')?.addEventListener('click', () => { project.script = demoScript; saveProject(); render(); startGeneration(); });
   document.querySelector('#useDemo').addEventListener('click', () => { project.script = demoScript; project.title = '失控的婚礼'; saveProject(); render(); showToast('示例剧本已载入'); });
   document.querySelector('#fileInput').addEventListener('change', readFile);
-  document.querySelector('#newProject').addEventListener('click', () => { generationRun += 1; project = { ...defaultProject, seedanceMaterials: { ...defaultProject.seedanceMaterials } }; saveProject(); render(); showToast('已新建空白项目'); });
+  document.querySelector('#newProject').addEventListener('click', createNewProject);
+  document.querySelectorAll('[data-project-id]').forEach((button) => button.addEventListener('click', () => switchProject(button.dataset.projectId)));
+  document.querySelectorAll('[data-delete-project-id]').forEach((button) => button.addEventListener('click', () => deleteProject(button.dataset.deleteProjectId)));
   document.querySelector('#exportProject').addEventListener('click', exportProject);
   document.querySelector('#importProject').addEventListener('click', () => document.querySelector('#projectFileInput').click());
   document.querySelector('#projectFileInput').addEventListener('change', importProject);
@@ -344,7 +409,6 @@ function bindEvents() {
   document.querySelector('#copyOutput').addEventListener('click', copyOutput);
   document.querySelector('#rerunStep')?.addEventListener('click', () => startGeneration(true));
   document.querySelector('#generateVideo')?.addEventListener('click', () => startGeneration(true));
-  document.querySelector('#dismissTip').addEventListener('click', (event) => event.currentTarget.closest('.tip').remove());
   document.querySelector('#openSettings').addEventListener('click', openModelSettings);
   document.querySelector('#heroModelStatus').addEventListener('click', openModelSettings);
   document.querySelector('#closeSettings').addEventListener('click', closeModelSettings);
@@ -365,6 +429,15 @@ function bindEvents() {
     const suffix = project.outputs.storyboard?.unifiedSuffix;
     if (suffix) copyText(suffix, '统一附加词已复制');
   });
+  document.querySelectorAll('.copy-asset-prompt').forEach((button) => button.addEventListener('click', () => {
+    const item = project.outputs.assets?.promptItems?.[Number(button.dataset.assetPromptIndex)];
+    if (item?.prompt) copyText(item.prompt, `${item.name || '参考图'}提示词已复制`);
+  }));
+  document.querySelector('#copyAllAssetPrompts')?.addEventListener('click', () => {
+    const items = project.outputs.assets?.promptItems || [];
+    if (!items.length) return showToast('当前没有可复制的参考图提示词');
+    copyText(items.map((item) => `【${item.type}｜${item.name}】\n文件名：${item.fileName}\n${item.prompt}`).join('\n\n'), '全部参考图提示词已复制');
+  });
   document.querySelectorAll('.material-count').forEach((input) => {
     const updateMaterials = () => {
     const maxes = { images: 9, videos: 3, audios: 3 };
@@ -381,6 +454,51 @@ function bindEvents() {
       input._materialTimer = window.setTimeout(updateMaterials, 250);
     });
   });
+}
+
+function stopCurrentGeneration() {
+  generationRun += 1;
+  if (!project.running) return;
+  project.running = false;
+  saveProject();
+}
+
+function createNewProject() {
+  stopCurrentGeneration();
+  const newProject = createProject();
+  projectLibrary.projects.push(newProject);
+  projectLibrary.activeProjectId = newProject.id;
+  project = newProject;
+  saveProjectLibrary();
+  render();
+  showToast('已新建项目，之前的项目仍保留在左侧');
+}
+
+function switchProject(projectId) {
+  if (!projectId || projectId === project.id) return;
+  stopCurrentGeneration();
+  const nextProject = projectLibrary.projects.find((item) => item.id === projectId);
+  if (!nextProject) return showToast('没有找到这个项目');
+  projectLibrary.activeProjectId = nextProject.id;
+  project = nextProject;
+  saveProjectLibrary();
+  render();
+  showToast(`已切换到：${project.title}`);
+}
+
+function deleteProject(projectId) {
+  const target = projectLibrary.projects.find((item) => item.id === projectId);
+  if (!target || projectLibrary.projects.length <= 1) return;
+  if (!window.confirm(`确定删除“${target.title}”吗？此操作无法撤销。`)) return;
+  if (target.id === project.id) stopCurrentGeneration();
+  projectLibrary.projects = projectLibrary.projects.filter((item) => item.id !== projectId);
+  if (target.id === project.id) {
+    project = projectLibrary.projects[0];
+    projectLibrary.activeProjectId = project.id;
+  }
+  saveProjectLibrary();
+  render();
+  showToast(`已删除项目：${target.title}`);
 }
 
 function openModelSettings() { document.querySelector('#settingsModal').hidden = false; document.querySelector('#deepseekKey').focus(); }
@@ -448,12 +566,19 @@ function renderAIWorkflow(data, usage, model) {
     return `<article class="seedance-shot ai-shot"><div class="shot-card-head"><div><span class="shot-number">${esc(String(shot.no || String(index + 1).padStart(2, '0')))}</span><div><h4>${esc(String(shot.title || `镜头${index + 1}`))}</h4><p>${esc(durationText)} · ${uploads.length}项上传素材</p></div></div><div class="shot-actions"><span>${esc(durationText)}</span><button class="copy-shot" data-shot-index="${index}">复制提示词</button></div></div><div class="upload-plan"><b>上传：</b>${uploads.map((upload) => `<span><code>${esc(String(upload.ref || ''))}</code>${esc(String(upload.asset || ''))}：${esc(String(upload.purpose || ''))}</span>`).join('')}</div><div class="segment-list">${segments.map((segment) => `<div><b>${esc(String(segment.time || ''))}</b><span>${esc(String(segment.visual || ''))}</span></div>`).join('')}</div><div class="sound-line"><b>声音：</b>${esc(String(shot.sound || ''))}</div><pre>${esc(prompt)}</pre></article>`;
   }).join('');
   const storyboardBody = `<div class="unified-suffix"><div><b>统一附加词</b><span>复制镜头提示词时一并添加</span></div><p>${esc(unifiedSuffix)}</p><button id="copyUnifiedSuffix">复制统一附加词</button></div><div class="prompt-toolbar"><div><b>第一集 ${shots.length} 个镜头提示词</b><span>由 DeepSeek V4 Pro 按剧情节拍、对白量和动作量设计</span></div><button id="copyAllSeedance">复制全部提示词</button></div><div class="seedance-shots">${shotCards}</div>`;
-  const assetItems = [
-    ...(Array.isArray(assets.characters) ? assets.characters.map((item) => ({ ...item, type: '角色' })) : []),
-    ...(Array.isArray(assets.scenes) ? assets.scenes.map((item) => ({ ...item, type: '场景' })) : []),
-    ...(Array.isArray(assets.props) ? assets.props.map((item) => ({ ...item, type: '道具' })) : []),
-  ];
-  const assetsBody = `<div class="asset-grid">${assetItems.map((item, index) => `<div class="asset-card ${item.type === '角色' ? 'asset-character' : 'asset-scene'} ${index % 2 ? 'dark' : ''}"><span class="asset-type">${item.type}</span><strong>${esc(String(item.name || ''))}</strong><small>${esc(String(item.description || ''))}</small><em>DeepSeek 生成</em></div>`).join('')}</div>`;
+  const checklist = Array.isArray(assets.characterChecklist) ? assets.characterChecklist : [];
+  const differenceMatrix = Array.isArray(assets.characterDifferenceMatrix) ? assets.characterDifferenceMatrix : [];
+  const promptItems = [
+    ...(assets.overviewBoard?.prompt ? [{ ...assets.overviewBoard, type: '总览参考板' }] : []),
+    ...(Array.isArray(assets.characters) ? assets.characters.map((item) => ({ ...item, type: '人物三视图' })) : []),
+    ...(Array.isArray(assets.scenes) ? assets.scenes.map((item) => ({ ...item, type: '场景设定图' })) : []),
+    ...(Array.isArray(assets.groups) ? assets.groups.map((item) => ({ ...item, type: '群像参考图' })) : []),
+    ...(Array.isArray(assets.props) ? assets.props.map((item) => ({ ...item, type: '道具参考图' })) : []),
+  ].map((item) => ({ ...item, prompt: String(item.prompt || item.description || '') }));
+  const checklistBody = checklist.length ? `<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">CAST CHECKLIST</span><h4>人物三视图生成清单</h4></div><span>${checklist.filter((item) => item.requiresTurnaround).length} 人需要单独出图</span></div><div class="asset-checklist">${checklist.map((item) => `<div><b>${esc(String(item.name || ''))}</b><span>${esc(String(item.roleType || '人物'))}</span><div class="asset-flags"><i class="${item.speaks ? 'yes' : ''}">对白</i><i class="${item.drivesPlot ? 'yes' : ''}">推动剧情</i><i class="${item.recurring ? 'yes' : ''}">反复出现</i><i class="${item.needsCloseUp ? 'yes' : ''}">特写</i></div><em class="${item.requiresTurnaround ? 'required' : ''}">${item.requiresTurnaround ? '生成三视图' : '归入功能人物'}</em><small>${esc(String(item.reason || ''))}</small></div>`).join('')}</div></section>` : '';
+  const matrixBody = differenceMatrix.length ? `<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">FACE DIFFERENCE MATRIX</span><h4>人物差异化视觉锚点</h4></div><span>防止角色同脸</span></div><div class="asset-matrix"><div class="asset-matrix-row header"><b>角色 / 脸谱</b><b>面部锚点</b><b>发型 / 体态</b><b>服装 / 排除项</b></div>${differenceMatrix.map((item) => `<div class="asset-matrix-row"><b>${esc(String(item.name || ''))}<small>${esc(String(item.faceCode || ''))} · ${esc(String(item.ageRange || item.ageImpression || ''))}</small></b><span>${esc([item.faceShape, item.eyeShape, item.brows, item.noseLips, item.jawCheekbones].filter(Boolean).join('；'))}</span><span>${esc([item.hair, item.bodyType].filter(Boolean).join('；'))}</span><span>${esc([item.clothingSilhouette, item.signatureAccessory, item.differentFrom].filter(Boolean).join('；'))}</span></div>`).join('')}</div></section>` : '';
+  const promptCards = promptItems.map((item, index) => `<article class="asset-prompt-card"><div class="asset-prompt-head"><div><span>${esc(String(item.type))}</span><h4>${esc(String(item.name || '参考图'))}</h4><code>${esc(String(item.fileName || ''))}</code></div><button class="copy-asset-prompt" data-asset-prompt-index="${index}">复制提示词</button></div>${item.description ? `<p>${esc(String(item.description))}</p>` : ''}${Array.isArray(item.exclusions) && item.exclusions.length ? `<div class="asset-exclusions"><b>排除：</b>${item.exclusions.map((value) => `<span>${esc(String(value))}</span>`).join('')}</div>` : ''}${Array.isArray(item.spatialAnchors) && item.spatialAnchors.length ? `<div class="asset-exclusions anchors"><b>空间锚点：</b>${item.spatialAnchors.map((value) => `<span>${esc(String(value))}</span>`).join('')}</div>` : ''}<pre>${esc(item.prompt)}</pre></article>`).join('');
+  const assetsBody = `${checklistBody}${matrixBody}<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">REFERENCE IMAGE PROMPTS</span><h4>参考图生成提示词</h4></div><button id="copyAllAssetPrompts">复制全部提示词</button></div><div class="asset-prompt-list">${promptCards}</div></section>`;
   const usageText = usage ? `输入 ${usage.prompt_tokens || 0} · 输出 ${usage.completion_tokens || 0} tokens` : '用量由 DeepSeek 账户结算';
 
   return {
@@ -461,7 +586,7 @@ function renderAIWorkflow(data, usage, model) {
     episodes: { title: '分集大纲', subtitle: `${episodes.length} 集 · 人物与主线保持一致`, time: 'AI 生成', body: episodesBody },
     script: { title: script.title || '短剧剧本', subtitle: `${scenes.length} 场 · 可拍摄动作与人物对白`, time: 'AI 生成', body: scriptBody },
     storyboard: { title: storyboard.title || '即梦二点零分镜提示词', subtitle: `${shots.length} 个镜头 · 时长由剧情动态分配`, time: 'AI 生成', prompts: shots.map((shot) => String(shot.prompt || '')), unifiedSuffix, body: storyboardBody },
-    assets: { title: '视觉素材清单', subtitle: `${assetItems.length} 项角色、场景与道具参考`, time: 'AI 生成', body: assetsBody },
+    assets: { title: '视觉素材参考图提示词', subtitle: `${promptItems.length} 项 · 九宫格、人物三视图、场景多视角与道具`, time: 'AI 生成', promptItems, body: assetsBody },
   };
 }
 
@@ -568,15 +693,18 @@ function importProject(event) {
     try {
       const incoming = JSON.parse(reader.result);
       if (!incoming || typeof incoming !== 'object' || typeof incoming.script !== 'string') throw new Error('invalid project');
-      generationRun += 1;
-      project = {
-        ...defaultProject,
+      stopCurrentGeneration();
+      project = normalizeProject({
         ...incoming,
+        id: createProjectId(),
+        createdAt: new Date().toISOString(),
         schemaVersion: SCHEMA_VERSION,
         running: false,
         completed: Array.isArray(incoming.completed) ? incoming.completed.filter((id) => steps.some((step) => step.id === id)) : [],
         outputs: incoming.outputs && typeof incoming.outputs === 'object' ? incoming.outputs : {},
-      };
+      });
+      projectLibrary.projects.push(project);
+      projectLibrary.activeProjectId = project.id;
       saveProject(); render(); showToast(`已导入项目：${project.title}`);
     } catch { showToast('项目文件格式不正确'); }
     event.target.value = '';
