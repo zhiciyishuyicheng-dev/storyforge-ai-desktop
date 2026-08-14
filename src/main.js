@@ -4,6 +4,12 @@ const LEGACY_STORAGE_KEY = 'storyforge-project-v1';
 const LIBRARY_STORAGE_KEY = 'storyforge-project-library-v1';
 const LIBRARY_SCHEMA_VERSION = 1;
 const SCHEMA_VERSION = 5;
+const SEEDREAM_DEFAULT_MODEL = 'doubao-seedream-5-0-lite-260128';
+const SEEDREAM_DEFAULT_SIZE = '2K';
+const SEEDREAM_MODELS = [
+  { id: 'doubao-seedream-5-0-lite-260128', label: 'Seedream 5.0 Lite', pricePerImage: 0.22 },
+  { id: 'doubao-seedream-5-0-260128', label: 'Seedream 5.0 正式版', pricePerImage: null },
+];
 
 const steps = [
   { id: 'analysis', no: '01', label: '故事分析', icon: '⌘', sub: '主线与人物' },
@@ -25,6 +31,7 @@ const defaultProject = {
   completed: [],
   outputs: {},
   seedanceMaterials: { images: 3, videos: 0, audios: 0 },
+  assetGeneration: { status: 'idle', model: SEEDREAM_DEFAULT_MODEL, size: SEEDREAM_DEFAULT_SIZE, items: [], outputDirectory: '', generatedCount: 0, totalCount: 0 },
   running: false,
   createdAt: null,
   updatedAt: null,
@@ -35,12 +42,14 @@ let project = getActiveProject();
 let toastTimer;
 let generationRun = 0;
 let deepseekStatus = { configured: false, model: 'deepseek-v4-pro', checking: true };
+let seedreamStatus = { configured: false, model: SEEDREAM_DEFAULT_MODEL, size: SEEDREAM_DEFAULT_SIZE, models: SEEDREAM_MODELS, checking: true };
 
 function createProject(overrides = {}) {
   const now = new Date().toISOString();
   return {
     ...defaultProject,
     seedanceMaterials: { ...defaultProject.seedanceMaterials },
+    assetGeneration: { ...defaultProject.assetGeneration, items: [] },
     ...overrides,
     id: overrides.id || createProjectId(),
     createdAt: overrides.createdAt || now,
@@ -58,6 +67,26 @@ function normalizeProject(saved) {
   migrated.completed = Array.isArray(saved?.completed) ? saved.completed.filter((id) => steps.some((step) => step.id === id)) : [];
   migrated.outputs = saved?.outputs && typeof saved.outputs === 'object' ? saved.outputs : {};
   migrated.seedanceMaterials = { ...defaultProject.seedanceMaterials, ...(saved?.seedanceMaterials || {}) };
+  migrated.assetGeneration = {
+    ...defaultProject.assetGeneration,
+    ...(saved?.assetGeneration || {}),
+    items: Array.isArray(saved?.assetGeneration?.items) ? saved.assetGeneration.items : [],
+  };
+  const promptItems = migrated.outputs?.assets?.promptItems;
+  if (Array.isArray(promptItems)) {
+    const filteredPrompts = promptItems.filter((item) => !isDeprecatedOverviewItem(item));
+    if (filteredPrompts.length !== promptItems.length) {
+      migrated.outputs.assets.promptItems = filteredPrompts;
+      migrated.outputs.assets.subtitle = `${filteredPrompts.length} 张 · 人物三视图、场景多视角、群像与道具`;
+      const validFiles = new Set(filteredPrompts.map((item) => String(item.fileName || '')).filter(Boolean));
+      migrated.assetGeneration.items = migrated.assetGeneration.items.filter((item) => {
+        const fileName = String(item?.fileName || '');
+        return !isDeprecatedOverviewItem(item) && (!fileName || validFiles.has(fileName));
+      });
+      migrated.assetGeneration.totalCount = filteredPrompts.length;
+      migrated.assetGeneration.generatedCount = migrated.assetGeneration.items.filter((item) => item.status === 'success').length;
+    }
+  }
   if (saved?.schemaVersion !== SCHEMA_VERSION) {
     migrated.outputs = {};
     migrated.completed = [];
@@ -113,6 +142,29 @@ function esc(value = '') {
   return value.replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
 }
 
+function isDeprecatedOverviewItem(item) {
+  const identity = [item?.type, item?.name, item?.fileName].map((value) => String(value || '')).join(' ');
+  return item?.type === '总览参考板' || /九宫格制作参考板|制作参考板.*九宫格/.test(identity);
+}
+
+function cleanRemoteError(error, fallback = '操作失败') {
+  const message = String(error?.message || error || fallback);
+  const cleaned = message
+    .replace(/^Error invoking remote method '[^']+':\s*Error:\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim() || fallback;
+  if (/has not activated the model|model service.*not activated|not activated.*model/i.test(cleaned)) {
+    const model = cleaned.match(/doubao-seedream-[a-z0-9-]+/i)?.[0] || '';
+    const label = model.includes('-lite-') ? 'Seedream 5.0 Lite' : 'Seedream 5.0 正式版';
+    return `当前火山方舟账号尚未开通 ${label}${model ? `（${model}）` : ''}。充值不会自动开通模型，请到火山方舟“开通管理”启用，或在模型设置中切换到已开通的版本。`;
+  }
+  return cleaned;
+}
+
+function seedreamModelLabel(modelId) {
+  return SEEDREAM_MODELS.find((item) => item.id === modelId)?.label || 'Seedream 5.0';
+}
+
 function currentIndex() { return steps.findIndex((step) => step.id === project.activeStep); }
 
 function projectListTemplate() {
@@ -150,18 +202,20 @@ function appTemplate() {
           <div class="sidebar-editor-head"><div><span class="section-kicker">INPUT</span><h2>剧本入口</h2></div><span class="format-label">TXT · MD</span></div>
           <div class="script-input-wrap ${project.script ? 'has-content' : ''}"><textarea id="scriptInput" placeholder="把小说改编后的剧本粘贴到这里...\n\n建议包含：集数、场景、人物和对白。${project.script ? '' : '\n\n还没有剧本？试试下方示例。'}">${esc(project.script)}</textarea><div class="textarea-footer"><span>${project.script.length ? `${project.script.length} 字` : '0 字'}</span><label class="upload-link" for="fileInput">↑ 导入文件</label><input type="file" id="fileInput" accept=".txt,.md" hidden /></div></div>
           <div class="sidebar-input-actions"><button class="sample-link" id="useDemo">加载示例 <span>↗</span></button><button class="primary-button" id="startGenerate" ${project.running ? 'disabled' : ''}><span class="sparkle">✦</span> ${generateLabel} <span>→</span></button></div>
-          <p class="auto-flow-note">前五步自动完成，视频生成手动开始</p>
+          <p class="auto-flow-note">前四步由 DeepSeek 完成，第五步由 Seedream 生成并保存参考图</p>
         </section>
         <div class="sidebar-bottom">
           <button class="account" id="openSettings"><div class="avatar">深</div><div><b>DeepSeek V4 Pro</b><small>${deepseekStatus.configured ? '模型已连接' : '需要配置 API Key'}</small></div><span class="settings">⚙</span></button>
+          <button class="account seedream-account" id="openSeedreamSettings"><div class="avatar seedream-avatar">图</div><div><b>${esc(seedreamModelLabel(seedreamStatus.model))}</b><small>${seedreamStatus.configured ? `${seedreamStatus.size} 生图已连接` : '需要配置火山方舟 API Key'}</small></div><span class="settings">⚙</span></button>
         </div>
       </aside>
       <main class="main">
         <header class="topbar"><div class="breadcrumbs"><span>工作台</span><i>/</i><b>${esc(project.title)}</b></div><div class="top-actions"><span class="saved"><span class="saved-dot"></span> 已自动保存</span><button class="icon-button" title="字体缩放：Ctrl + / Ctrl - / Ctrl 0">A</button><button class="transfer-button" id="importProject">导入项目</button><button class="export-button" id="exportProject">导出项目 <span>↓</span></button><input type="file" id="projectFileInput" accept=".json,application/json" hidden /></div></header>
-        <section class="hero"><div><div class="eyebrow">AI SHORT DRAMA STUDIO</div><h1>把故事，变成一部短剧。</h1><p>视频生成前五个阶段全部由 DeepSeek V4 Pro 完成，分镜严格遵循即梦二点零提示词规范。</p></div><div class="hero-meta"><button class="status-pill model-status ${deepseekStatus.configured ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${deepseekStatus.checking ? '正在检查模型' : deepseekStatus.configured ? 'DeepSeek V4 Pro 已连接' : '点击配置 DeepSeek'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
+        <section class="hero"><div><div class="eyebrow">AI SHORT DRAMA STUDIO</div><h1>把故事，变成一部短剧。</h1><p>DeepSeek 负责剧本与分镜，Seedream 5.0 负责第五步参考图生成，图片自动保存到本机。</p></div><div class="hero-meta"><button class="status-pill model-status ${deepseekStatus.configured ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${deepseekStatus.checking ? '正在检查模型' : deepseekStatus.configured ? 'DeepSeek 已连接' : '配置 DeepSeek'}</button><button class="status-pill model-status ${seedreamStatus.configured ? 'connected' : 'disconnected'}" id="heroSeedreamStatus"><i></i> ${seedreamStatus.checking ? '正在检查生图模型' : seedreamStatus.configured ? 'Seedream 已连接' : '配置 Seedream'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
         <section class="output-card card"><div class="card-head output-head"><div><span class="section-kicker">OUTPUT</span><h2>生成结果</h2></div><div class="output-tools"><button class="small-button" id="clearOutput">清空结果</button><button class="small-button" id="copyOutput">复制当前结果</button></div></div><div id="outputArea">${outputTemplate()}</div></section>
       </main>
       <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4 Pro</b><small>视频生成前的故事分析、分集大纲、剧本、分镜和视觉素材全部使用此模型。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
+      <div class="modal-backdrop" id="seedreamSettingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">IMAGE MODEL SETTINGS</span><h2>Seedream 5.0 生图设置</h2></div><button id="closeSeedreamSettings">×</button></div><div class="model-lock seedream-lock"><span>第五步真实生图</span><b>火山方舟 Seedream 5.0</b><small>逐张生成角色、场景和道具参考图，并保存到“文档\StoryForge\项目名\项目编号\视觉素材”。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedreamKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedreamStatus.configured ? '密钥已加密保存；留空可只修改模型和尺寸。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>图片模型</span><select id="seedreamModel">${SEEDREAM_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedreamStatus.model ? 'selected' : ''}>${item.label}${item.pricePerImage ? ` · ¥${item.pricePerImage.toFixed(2)}/张` : ' · 需账号单独开通'}</option>`).join('')}</select><small>充值只增加余额；Seedream 5.0 正式版和 Lite 都需要在火山方舟单独开通。</small></label><label class="key-field"><span>输出尺寸</span><select id="seedreamSize"><option value="2K" ${seedreamStatus.size === '2K' ? 'selected' : ''}>2K（推荐）</option><option value="4K" ${seedreamStatus.size === '4K' ? 'selected' : ''}>4K</option></select><small>每个提示词生成一张 PNG 图片，不加水印。</small></label><div class="modal-message" id="seedreamMessage"></div><div class="modal-actions"><button class="outline-button" id="testSeedream">测试 API Key（不生图）</button><button class="primary-button" id="saveSeedream">保存设置</button></div><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedream 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div></div></div>
       <div class="toast" id="toast"></div>
     </div>`;
 }
@@ -174,12 +228,45 @@ function stepTemplate(step) {
   return `<button class="step ${active ? 'active' : ''} ${done ? 'done' : ''} ${running ? 'running' : ''}" data-step="${step.id}"><span class="step-icon">${done ? '✓' : step.icon}</span><span class="step-copy"><b>${step.no}　${step.label}</b><small>${step.sub}</small></span>${running ? '<span class="loader"></span>' : done ? '<span class="done-mark">完成</span>' : '<span class="step-arrow">›</span>'}</button>`;
 }
 
+function assetGenerationTemplate(output) {
+  const prompts = Array.isArray(output?.promptItems) ? output.promptItems : [];
+  const state = project.assetGeneration || defaultProject.assetGeneration;
+  const items = Array.isArray(state.items) ? state.items : [];
+  const completed = items.filter((item) => item.status === 'success').length;
+  const failed = items.filter((item) => item.status === 'failed').length;
+  const progress = prompts.length ? Math.round((completed / prompts.length) * 100) : 0;
+  const modelInfo = SEEDREAM_MODELS.find((item) => item.id === (state.model || seedreamStatus.model));
+  const priceText = modelInfo?.pricePerImage
+    ? `预计 ¥${(prompts.length * modelInfo.pricePerImage).toFixed(2)}（${prompts.length} 张 × ¥${modelInfo.pricePerImage.toFixed(2)}）`
+    : `${prompts.length} 张，费用以火山方舟控制台为准`;
+  const statusText = state.status === 'running'
+    ? `正在生成 ${Math.min(completed + 1, prompts.length)} / ${prompts.length}`
+    : completed === prompts.length && prompts.length
+      ? `已完成 ${completed} / ${prompts.length}`
+      : failed
+        ? `已完成 ${completed} 张，失败 ${failed} 张`
+        : `等待生成 ${prompts.length} 张`;
+  const cards = prompts.map((prompt, index) => {
+    const result = items[index] || { status: 'pending' };
+    const statusLabel = { pending: '待生成', generating: '生成中', success: '已保存', failed: '生成失败' }[result.status] || '待生成';
+    const preview = result.status === 'success' && result.imageUrl
+      ? `<button class="asset-image-preview" data-show-asset-index="${index}" title="在文件夹中查看"><img src="${esc(String(result.imageUrl))}" alt="${esc(String(prompt.name || '参考图'))}"></button>`
+      : `<div class="asset-image-placeholder ${result.status}"><span>${result.status === 'generating' ? '✦' : result.status === 'failed' ? '!' : '图'}</span><small>${esc(statusLabel)}</small></div>`;
+    return `<article class="generated-asset-card">${preview}<div class="generated-asset-copy"><div><span>${esc(String(prompt.type || '参考图'))}</span><h4>${esc(String(prompt.name || `参考图${index + 1}`))}</h4><code>${esc(String(result.fileName || prompt.fileName || ''))}</code></div><b class="asset-result-status ${result.status}">${statusLabel}</b>${result.error ? `<p>${esc(cleanRemoteError(result.error, '生成失败'))}</p>` : ''}<button class="outline-button generate-one-asset" data-generate-asset-index="${index}" ${project.running ? 'disabled' : ''}>${result.status === 'success' ? '重新生成此图' : result.status === 'failed' ? '重试此图' : '生成此图'}</button></div></article>`;
+  }).join('');
+  return `<section class="seedream-generator"><div class="seedream-generator-head"><div><span class="section-kicker">SEEDREAM 5.0 IMAGE GENERATION</span><h4>第五步 · 生成真实参考图</h4><p>${esc(seedreamModelLabel(state.model || seedreamStatus.model))} · ${esc(String(state.size || seedreamStatus.size))} · ${esc(priceText)}</p></div><div class="seedream-actions"><button class="outline-button" id="configureSeedream">模型设置</button>${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开图片文件夹</button>' : ''}<button class="primary-button" id="generateAllAssets" ${project.running || !prompts.length ? 'disabled' : ''}>${failed ? '重试失败图片' : completed ? '继续生成' : '开始生成全部图片'}</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i>${!seedreamStatus.configured ? '<small>尚未配置火山方舟 API Key，配置后即可开始真实生图。</small>' : '<small>生成时请保持程序开启。成功图片不会因单张失败而丢失。</small>'}${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div>${cards ? `<div class="generated-assets-grid">${cards}</div>` : ''}</section>`;
+}
+
 function outputTemplate() {
   const output = project.outputs[project.activeStep];
   if (project.running && !output) return `<div class="generating"><div class="generating-orb">✦</div><h3>正在生成${steps[currentIndex()].label}...</h3><p>${currentIndex() < 5 ? `自动流程第 ${currentIndex() + 1} / 5 步，完成后将自动进入下一阶段` : '正在合成视频、配音与字幕'}</p><div class="generating-track"><i></i></div><small>无需手动确认，请保持程序开启</small></div>`;
   if (project.activeStep === 'video' && !output && steps.slice(0, 5).every((step) => project.completed.includes(step.id))) return `<div class="video-ready"><div class="video-ready-icon">▶</div><span class="section-kicker">READY TO GENERATE</span><h3>视频生成前的准备工作已完成</h3><p>故事、剧本、分镜和视觉素材已经自动生成。视频生成可能消耗模型额度，请确认后手动开始。</p><button class="next-button" id="generateVideo">开始生成视频 <span>→</span></button></div>`;
   if (!output) return `<div class="empty-output"><div class="empty-icon">✧</div><h3>准备好开始创作了吗？</h3><p>输入一段剧本，点击“开始生成”，你的短剧工作流会从这里展开。</p><button class="outline-button" id="emptyStart">使用示例开始 <span>→</span></button></div>`;
-  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(output.title)}</h3><p>${esc(output.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${output.body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> 已完成</b></div><div class="side-stat"><span>预计耗时</span><b>${output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? '<div class="side-stat vertical"><span>分镜规范</span><b>即梦二点零</b><small>每镜五秒<br>素材引用已分配</small></div>' : ''}<button class="outline-button full" id="rerunStep">重新生成 <span>↻</span></button>${project.activeStep === 'video' ? '<div class="auto-note">视频已生成，前置阶段无需人工确认。</div>' : '<div class="auto-note"><i>✓</i> 已自动确认并继续流程</div>'}</div></div>`;
+  const isAssets = project.activeStep === 'assets';
+  const stageComplete = project.completed.includes(project.activeStep);
+  const stageStatus = project.running ? '生成中' : stageComplete ? '已完成' : '待生成';
+  const body = `${isAssets ? assetGenerationTemplate(output) : ''}${output.body}`;
+  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(output.title)}</h3><p>${esc(output.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>预计耗时</span><b>${output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? '<div class="side-stat vertical"><span>分镜规范</span><b>即梦二点零</b><small>每镜五秒<br>素材引用已分配</small></div>' : ''}${isAssets ? `<div class="side-stat vertical"><span>生图模型</span><b>${esc(seedreamModelLabel(project.assetGeneration?.model || seedreamStatus.model))}</b><small>${esc(String(project.assetGeneration?.size || seedreamStatus.size))} · 本机自动保存</small></div>` : ''}<button class="outline-button full" id="rerunStep">重新生成 <span>↻</span></button>${project.activeStep === 'video' ? '<div class="auto-note">视频已生成，前置阶段无需人工确认。</div>' : stageComplete ? '<div class="auto-note"><i>✓</i> 已自动确认并继续流程</div>' : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
 }
 
 function makeOutput(id) {
@@ -405,16 +492,27 @@ function bindEvents() {
   document.querySelector('#exportProject').addEventListener('click', exportProject);
   document.querySelector('#importProject').addEventListener('click', () => document.querySelector('#projectFileInput').click());
   document.querySelector('#projectFileInput').addEventListener('change', importProject);
-  document.querySelector('#clearOutput').addEventListener('click', () => { generationRun += 1; project.outputs = {}; project.completed = []; project.activeStep = 'analysis'; project.running = false; saveProject(); render(); showToast('生成结果已清空'); });
+  document.querySelector('#clearOutput').addEventListener('click', () => { generationRun += 1; project.outputs = {}; project.completed = []; project.assetGeneration = { ...defaultProject.assetGeneration, items: [] }; project.activeStep = 'analysis'; project.running = false; saveProject(); render(); showToast('生成结果已清空，本地已生成图片不会被删除'); });
   document.querySelector('#copyOutput').addEventListener('click', copyOutput);
   document.querySelector('#rerunStep')?.addEventListener('click', () => startGeneration(true));
   document.querySelector('#generateVideo')?.addEventListener('click', () => startGeneration(true));
   document.querySelector('#openSettings').addEventListener('click', openModelSettings);
+  document.querySelector('#openSeedreamSettings').addEventListener('click', openSeedreamSettings);
   document.querySelector('#heroModelStatus').addEventListener('click', openModelSettings);
+  document.querySelector('#heroSeedreamStatus').addEventListener('click', openSeedreamSettings);
   document.querySelector('#closeSettings').addEventListener('click', closeModelSettings);
   document.querySelector('#settingsModal').addEventListener('click', (event) => { if (event.target.id === 'settingsModal') closeModelSettings(); });
   document.querySelector('#saveDeepSeek').addEventListener('click', saveDeepSeekSettings);
   document.querySelector('#testDeepSeek').addEventListener('click', testDeepSeekConnection);
+  document.querySelector('#closeSeedreamSettings').addEventListener('click', closeSeedreamSettings);
+  document.querySelector('#seedreamSettingsModal').addEventListener('click', (event) => { if (event.target.id === 'seedreamSettingsModal') closeSeedreamSettings(); });
+  document.querySelector('#saveSeedream').addEventListener('click', saveSeedreamSettings);
+  document.querySelector('#testSeedream').addEventListener('click', testSeedreamConnection);
+  document.querySelector('#configureSeedream')?.addEventListener('click', openSeedreamSettings);
+  document.querySelector('#generateAllAssets')?.addEventListener('click', () => generateSeedreamAssets({ token: ++generationRun, autoAdvance: true }));
+  document.querySelector('#openAssetFolder')?.addEventListener('click', openAssetOutputFolder);
+  document.querySelectorAll('[data-show-asset-index]').forEach((button) => button.addEventListener('click', () => showGeneratedAsset(Number(button.dataset.showAssetIndex))));
+  document.querySelectorAll('[data-generate-asset-index]').forEach((button) => button.addEventListener('click', () => generateSeedreamAssets({ token: ++generationRun, indexes: [Number(button.dataset.generateAssetIndex)], autoAdvance: false })));
   document.querySelectorAll('.copy-shot').forEach((button) => button.addEventListener('click', () => {
     const prompt = project.outputs.storyboard?.prompts?.[Number(button.dataset.shotIndex)];
     const suffix = project.outputs.storyboard?.unifiedSuffix || '';
@@ -503,6 +601,8 @@ function deleteProject(projectId) {
 
 function openModelSettings() { document.querySelector('#settingsModal').hidden = false; document.querySelector('#deepseekKey').focus(); }
 function closeModelSettings() { document.querySelector('#settingsModal').hidden = true; }
+function openSeedreamSettings() { document.querySelector('#seedreamSettingsModal').hidden = false; document.querySelector('#seedreamKey').focus(); }
+function closeSeedreamSettings() { document.querySelector('#seedreamSettingsModal').hidden = true; }
 
 function setModelMessage(message, type = '') {
   const node = document.querySelector('#modelMessage');
@@ -540,6 +640,55 @@ async function refreshDeepSeekStatus() {
   render();
 }
 
+function setSeedreamMessage(message, type = '') {
+  const node = document.querySelector('#seedreamMessage');
+  if (!node) return;
+  node.textContent = message;
+  node.className = `modal-message ${type}`;
+}
+
+async function saveSeedreamSettings() {
+  const apiKey = document.querySelector('#seedreamKey').value.trim();
+  const model = document.querySelector('#seedreamModel').value;
+  const size = document.querySelector('#seedreamSize').value;
+  if (!apiKey && !seedreamStatus.configured) return setSeedreamMessage('请输入火山方舟 API Key。', 'error');
+  setSeedreamMessage('正在使用 Windows 安全保存…');
+  try {
+    const status = await window.storyforgeAI.saveSeedreamSettings({ apiKey, model, size });
+    seedreamStatus = { ...seedreamStatus, ...status, checking: false };
+    setSeedreamMessage('Seedream 设置已安全保存。', 'success');
+    const shouldResume = project.activeStep === 'assets'
+      && project.outputs.assets?.promptItems?.length
+      && !project.completed.includes('assets')
+      && !project.running;
+    window.setTimeout(() => {
+      closeSeedreamSettings();
+      render();
+      showToast(`${seedreamModelLabel(model)} 已配置`);
+      if (shouldResume) generateSeedreamAssets({ token: ++generationRun, autoAdvance: true });
+    }, 450);
+  } catch (error) { setSeedreamMessage(cleanRemoteError(error, '保存失败。'), 'error'); }
+}
+
+async function testSeedreamConnection() {
+  const apiKey = document.querySelector('#seedreamKey').value.trim();
+  setSeedreamMessage('正在验证火山方舟 API Key，不会生成图片或产生生图费用…');
+  try {
+    await window.storyforgeAI.testSeedreamConnection(apiKey);
+    setSeedreamMessage('API Key 有效。注意：所选模型是否已开通，会在首次生图时验证。', 'success');
+  } catch (error) { setSeedreamMessage(cleanRemoteError(error, '连接失败。'), 'error'); }
+}
+
+async function refreshSeedreamStatus() {
+  if (!window.storyforgeAI) {
+    seedreamStatus = { configured: false, model: SEEDREAM_DEFAULT_MODEL, size: SEEDREAM_DEFAULT_SIZE, models: SEEDREAM_MODELS, checking: false };
+    render(); return;
+  }
+  try { seedreamStatus = { ...seedreamStatus, ...(await window.storyforgeAI.getSeedreamStatus()), checking: false }; }
+  catch { seedreamStatus = { configured: false, model: SEEDREAM_DEFAULT_MODEL, size: SEEDREAM_DEFAULT_SIZE, models: SEEDREAM_MODELS, checking: false }; }
+  render();
+}
+
 function renderAIWorkflow(data, usage, model) {
   const analysis = data.analysis || {};
   const characters = Array.isArray(analysis.characters) ? analysis.characters : [];
@@ -569,7 +718,6 @@ function renderAIWorkflow(data, usage, model) {
   const checklist = Array.isArray(assets.characterChecklist) ? assets.characterChecklist : [];
   const differenceMatrix = Array.isArray(assets.characterDifferenceMatrix) ? assets.characterDifferenceMatrix : [];
   const promptItems = [
-    ...(assets.overviewBoard?.prompt ? [{ ...assets.overviewBoard, type: '总览参考板' }] : []),
     ...(Array.isArray(assets.characters) ? assets.characters.map((item) => ({ ...item, type: '人物三视图' })) : []),
     ...(Array.isArray(assets.scenes) ? assets.scenes.map((item) => ({ ...item, type: '场景设定图' })) : []),
     ...(Array.isArray(assets.groups) ? assets.groups.map((item) => ({ ...item, type: '群像参考图' })) : []),
@@ -586,7 +734,7 @@ function renderAIWorkflow(data, usage, model) {
     episodes: { title: '分集大纲', subtitle: `${episodes.length} 集 · 人物与主线保持一致`, time: 'AI 生成', body: episodesBody },
     script: { title: script.title || '短剧剧本', subtitle: `${scenes.length} 场 · 可拍摄动作与人物对白`, time: 'AI 生成', body: scriptBody },
     storyboard: { title: storyboard.title || '即梦二点零分镜提示词', subtitle: `${shots.length} 个镜头 · 时长由剧情动态分配`, time: 'AI 生成', prompts: shots.map((shot) => String(shot.prompt || '')), unifiedSuffix, body: storyboardBody },
-    assets: { title: '视觉素材参考图提示词', subtitle: `${promptItems.length} 项 · 九宫格、人物三视图、场景多视角与道具`, time: 'AI 生成', promptItems, body: assetsBody },
+    assets: { title: 'Seedream 5.0 视觉素材', subtitle: `${promptItems.length} 张 · 人物三视图、场景多视角、群像与道具`, time: '逐张生成', promptItems, body: assetsBody },
   };
 }
 
@@ -602,6 +750,148 @@ function buildPromptFromShot(shot) {
   return `生成${formatDuration(shot.duration)}竖屏短剧。${uploads.map((item) => `${item.ref}作${item.purpose}`).join('，')}。\n${segments.map((item) => `${item.time}：${item.visual}`).join('\n')}\n声音：${shot.sound || ''}`;
 }
 
+function initializeAssetGeneration(promptItems) {
+  project.assetGeneration = {
+    status: 'pending',
+    model: seedreamStatus.model || SEEDREAM_DEFAULT_MODEL,
+    size: seedreamStatus.size || SEEDREAM_DEFAULT_SIZE,
+    outputDirectory: '',
+    generatedCount: 0,
+    totalCount: promptItems.length,
+    items: promptItems.map((item) => ({
+      name: String(item.name || ''),
+      type: String(item.type || ''),
+      fileName: String(item.fileName || ''),
+      status: 'pending',
+      localPath: '',
+      imageUrl: '',
+      error: '',
+    })),
+  };
+}
+
+function alignAssetGenerationItems(prompts) {
+  const state = project.assetGeneration || {};
+  const current = Array.isArray(state.items) ? state.items : [];
+  const byFileName = new Map(current.map((item) => [String(item.fileName || ''), item]));
+  state.items = prompts.map((prompt, index) => {
+    const saved = byFileName.get(String(prompt.fileName || '')) || current[index] || {};
+    return {
+      name: String(prompt.name || ''),
+      type: String(prompt.type || ''),
+      fileName: String(saved.fileName || prompt.fileName || ''),
+      status: saved.status || 'pending',
+      localPath: saved.localPath || '',
+      imageUrl: saved.imageUrl || '',
+      error: saved.error || '',
+      generatedAt: saved.generatedAt || '',
+    };
+  });
+  state.model = state.model || seedreamStatus.model || SEEDREAM_DEFAULT_MODEL;
+  state.size = state.size || seedreamStatus.size || SEEDREAM_DEFAULT_SIZE;
+  state.totalCount = prompts.length;
+  project.assetGeneration = state;
+  return state;
+}
+
+async function generateSeedreamAssets({ token, indexes = null, autoAdvance = true }) {
+  const prompts = project.outputs.assets?.promptItems || [];
+  if (!prompts.length) return showToast('第五步还没有可生成的参考图提示词');
+  if (!window.storyforgeAI || !seedreamStatus.configured) {
+    project.running = false;
+    project.activeStep = 'assets';
+    saveProject(); render();
+    openSeedreamSettings();
+    setSeedreamMessage('请先配置火山方舟 API Key。保存后会自动继续第五步。', 'error');
+    return;
+  }
+
+  const state = alignAssetGenerationItems(prompts);
+  state.model = seedreamStatus.model;
+  state.size = seedreamStatus.size;
+  state.lastError = '';
+  const requested = Array.isArray(indexes)
+    ? indexes.filter((index) => Number.isInteger(index) && index >= 0 && index < prompts.length)
+    : prompts.map((_, index) => index).filter((index) => state.items[index].status !== 'success');
+  if (!requested.length) {
+    if (autoAdvance) {
+      if (!project.completed.includes('assets')) project.completed.push('assets');
+      project.activeStep = 'video';
+      saveProject(); render();
+    } else showToast('所有参考图都已经生成');
+    return;
+  }
+
+  project.completed = project.completed.filter((id) => id !== 'assets');
+  project.activeStep = 'assets';
+  project.running = true;
+  state.status = 'running';
+  saveProject(); render();
+
+  for (const index of requested) {
+    if (token !== generationRun) return;
+    const prompt = prompts[index];
+    state.items[index] = { ...state.items[index], status: 'generating', error: '' };
+    state.generatedCount = state.items.filter((item) => item.status === 'success').length;
+    saveProject(); render();
+    try {
+      const result = await window.storyforgeAI.generateSeedreamImage({
+        projectId: project.id,
+        projectTitle: project.title,
+        index,
+        prompt: prompt.prompt,
+        fileName: prompt.fileName,
+        model: state.model,
+        size: state.size,
+      });
+      if (token !== generationRun) return;
+      state.items[index] = {
+        ...state.items[index],
+        ...result,
+        status: 'success',
+        error: '',
+        generatedAt: new Date().toISOString(),
+      };
+      state.outputDirectory = result.outputDirectory || state.outputDirectory;
+    } catch (error) {
+      if (token !== generationRun) return;
+      const message = cleanRemoteError(error, '生成失败');
+      state.items[index] = { ...state.items[index], status: 'failed', error: message };
+      if (/尚未开通|API Key 无效|没有模型权限|额度不足/.test(message)) state.lastError = message;
+    }
+    state.generatedCount = state.items.filter((item) => item.status === 'success').length;
+    saveProject(); render();
+    if (state.lastError) break;
+  }
+
+  if (token !== generationRun) return;
+  const failed = state.items.filter((item) => item.status === 'failed').length;
+  const allComplete = state.items.length === prompts.length && state.items.every((item) => item.status === 'success');
+  state.status = allComplete ? 'complete' : failed ? 'partial' : 'pending';
+  state.generatedCount = state.items.filter((item) => item.status === 'success').length;
+  project.running = false;
+  if (allComplete) {
+    if (!project.completed.includes('assets')) project.completed.push('assets');
+    if (autoAdvance) project.activeStep = 'video';
+    saveProject(); render();
+    showToast(`Seedream 已生成并保存 ${state.generatedCount} 张参考图`);
+  } else {
+    saveProject(); render();
+    showToast(state.lastError || `已生成 ${state.generatedCount} 张，${failed} 张失败，可单独重试`);
+  }
+}
+
+async function openAssetOutputFolder() {
+  try { await window.storyforgeAI.openSeedreamOutput(project.assetGeneration?.outputDirectory); }
+  catch (error) { showToast(cleanRemoteError(error, '无法打开图片文件夹')); }
+}
+
+async function showGeneratedAsset(index) {
+  const filePath = project.assetGeneration?.items?.[index]?.localPath;
+  try { await window.storyforgeAI.showSeedreamImage(filePath); }
+  catch (error) { showToast(cleanRemoteError(error, '无法找到这张图片')); }
+}
+
 async function startGeneration(retry = false) {
   if (!project.script.trim()) { showToast('请先输入或导入一段剧本'); document.querySelector('#scriptInput')?.focus(); return; }
   const activeIndex = currentIndex();
@@ -614,6 +904,7 @@ async function startGeneration(retry = false) {
   const token = ++generationRun;
   project.outputs = {};
   project.completed = [];
+  project.assetGeneration = { ...defaultProject.assetGeneration, items: [] };
   project.activeStep = 'analysis';
   project.running = true;
   saveProject(); render();
@@ -621,7 +912,7 @@ async function startGeneration(retry = false) {
     const response = await window.storyforgeAI.generateWorkflow(project.script);
     if (token !== generationRun) return;
     const outputs = renderAIWorkflow(response.data, response.usage, response.model);
-    const stageIds = ['analysis', 'episodes', 'script', 'storyboard', 'assets'];
+    const stageIds = ['analysis', 'episodes', 'script', 'storyboard'];
     for (const stageId of stageIds) {
       if (token !== generationRun) return;
       project.activeStep = stageId;
@@ -630,10 +921,19 @@ async function startGeneration(retry = false) {
       saveProject(); render();
       await wait(260);
     }
-    project.activeStep = 'video';
-    project.running = false;
+    project.activeStep = 'assets';
+    project.outputs.assets = outputs.assets;
+    initializeAssetGeneration(outputs.assets.promptItems || []);
     project.aiGeneration = { model: response.model || 'deepseek-v4-pro', usage: response.usage || null, generatedAt: new Date().toISOString() };
-    saveProject(); render(); showToast('DeepSeek 已完成视频前五个阶段');
+    saveProject(); render();
+    if (!seedreamStatus.configured) {
+      project.running = false;
+      saveProject(); render();
+      openSeedreamSettings();
+      setSeedreamMessage('DeepSeek 已完成前四步。请配置火山方舟 API Key，保存后自动生成第五步参考图。', 'error');
+      return;
+    }
+    await generateSeedreamAssets({ token, autoAdvance: true });
   } catch (error) {
     if (token !== generationRun) return;
     project.running = false;
@@ -719,3 +1019,4 @@ function showToast(message) {
 
 render();
 refreshDeepSeekStatus();
+refreshSeedreamStatus();

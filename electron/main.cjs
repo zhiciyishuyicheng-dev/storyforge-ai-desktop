@@ -2,11 +2,19 @@ const { app, BrowserWindow, shell, ipcMain, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { SYSTEM_PROMPT, makeUserPrompt } = require('./deepseek-prompt.cjs');
+const {
+  DEFAULT_MODEL: SEEDREAM_DEFAULT_MODEL,
+  DEFAULT_SIZE: SEEDREAM_DEFAULT_SIZE,
+  KNOWN_MODELS: SEEDREAM_MODELS,
+  generateAndSave: generateSeedreamAndSave,
+  testConnection: testSeedreamConnection,
+} = require('./seedream.cjs');
 
 const MODEL = 'deepseek-v4-pro';
 const API_URL = 'https://api.deepseek.com/chat/completions';
 
 function settingsPath() { return path.join(app.getPath('userData'), 'deepseek-settings.json'); }
+function seedreamSettingsPath() { return path.join(app.getPath('userData'), 'seedream-settings.json'); }
 
 function readStoredKey() {
   try {
@@ -20,6 +28,30 @@ function storeKey(apiKey) {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('当前 Windows 环境无法启用安全加密存储。');
   const encryptedKey = safeStorage.encryptString(apiKey).toString('base64');
   fs.writeFileSync(settingsPath(), JSON.stringify({ encryptedKey, model: MODEL }, null, 2), 'utf8');
+}
+
+function readSeedreamSettings() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(seedreamSettingsPath(), 'utf8'));
+    const apiKey = saved.encryptedKey && safeStorage.isEncryptionAvailable()
+      ? safeStorage.decryptString(Buffer.from(saved.encryptedKey, 'base64'))
+      : '';
+    return {
+      apiKey,
+      model: SEEDREAM_MODELS.some((item) => item.id === saved.model) ? saved.model : SEEDREAM_DEFAULT_MODEL,
+      size: ['2K', '4K'].includes(saved.size) ? saved.size : SEEDREAM_DEFAULT_SIZE,
+    };
+  } catch {
+    return { apiKey: '', model: SEEDREAM_DEFAULT_MODEL, size: SEEDREAM_DEFAULT_SIZE };
+  }
+}
+
+function storeSeedreamSettings(apiKey, model, size) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('当前 Windows 环境无法启用安全加密存储。');
+  if (!SEEDREAM_MODELS.some((item) => item.id === model)) throw new Error('请选择受支持的 Seedream 5.0 模型。');
+  if (!['2K', '4K'].includes(size)) throw new Error('请选择 2K 或 4K 图片尺寸。');
+  const encryptedKey = safeStorage.encryptString(apiKey).toString('base64');
+  fs.writeFileSync(seedreamSettingsPath(), JSON.stringify({ encryptedKey, model, size }, null, 2), 'utf8');
 }
 
 async function callDeepSeek(apiKey, messages, maxTokens = 24000) {
@@ -64,7 +96,6 @@ function validateWorkflow(data) {
     const withoutRefs = String(shot.prompt).replace(/@(Image|Video|Audio)\d+/g, '');
     if (/[A-Za-z]{2,}/.test(withoutRefs)) throw new Error(`镜头 ${shot.no || ''} 含有中英文混排，已拒绝本次结果，请重新生成。`);
   }
-  if (!assets?.overviewBoard?.prompt) throw new Error('DeepSeek 未返回九宫格制作参考板提示词，请重试。');
   if (!Array.isArray(assets.characterChecklist) || !assets.characterChecklist.length) throw new Error('DeepSeek 未返回人物三视图生成清单，请重试。');
   if (!Array.isArray(assets.characterDifferenceMatrix) || !assets.characterDifferenceMatrix.length) throw new Error('DeepSeek 未返回人物差异化视觉锚点矩阵，请重试。');
   if (!Array.isArray(assets.characters) || assets.characters.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的人物参考图提示词不完整，请重试。');
@@ -94,6 +125,68 @@ ipcMain.handle('deepseek:generate-workflow', async (_event, rawScript) => {
   const script = String(rawScript || '').trim();
   if (!script) throw new Error('剧本不能为空。');
   return callDeepSeek(apiKey, [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: makeUserPrompt(script) }]);
+});
+
+ipcMain.handle('seedream:get-status', () => {
+  const settings = readSeedreamSettings();
+  return {
+    configured: Boolean(settings.apiKey),
+    model: settings.model,
+    size: settings.size,
+    models: SEEDREAM_MODELS,
+  };
+});
+ipcMain.handle('seedream:save-settings', (_event, rawSettings) => {
+  const existing = readSeedreamSettings();
+  const apiKey = String(rawSettings?.apiKey || '').trim() || existing.apiKey;
+  const model = String(rawSettings?.model || SEEDREAM_DEFAULT_MODEL);
+  const size = String(rawSettings?.size || SEEDREAM_DEFAULT_SIZE);
+  if (!apiKey) throw new Error('请输入火山方舟 API Key。');
+  storeSeedreamSettings(apiKey, model, size);
+  return { configured: true, model, size, models: SEEDREAM_MODELS };
+});
+ipcMain.handle('seedream:test', async (_event, rawKey) => {
+  const existing = readSeedreamSettings();
+  const apiKey = String(rawKey || '').trim() || existing.apiKey;
+  if (!apiKey) throw new Error('请先输入火山方舟 API Key。');
+  await testSeedreamConnection(apiKey);
+  return { ok: true };
+});
+ipcMain.handle('seedream:generate-image', async (_event, rawTask) => {
+  const settings = readSeedreamSettings();
+  if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
+  const model = String(rawTask?.model || settings.model);
+  const size = String(rawTask?.size || settings.size);
+  if (!SEEDREAM_MODELS.some((item) => item.id === model)) throw new Error('Seedream 模型不受支持。');
+  if (!['2K', '4K'].includes(size)) throw new Error('图片尺寸不受支持。');
+  return generateSeedreamAndSave({
+    apiKey: settings.apiKey,
+    model,
+    size,
+    prompt: String(rawTask?.prompt || ''),
+    outputRoot: app.getPath('documents'),
+    projectTitle: String(rawTask?.projectTitle || '未命名短剧项目'),
+    projectId: String(rawTask?.projectId || 'project'),
+    fileName: String(rawTask?.fileName || ''),
+    index: Number(rawTask?.index || 0),
+  });
+});
+ipcMain.handle('seedream:open-output', async (_event, rawPath) => {
+  const target = path.resolve(String(rawPath || '').trim());
+  if (!target) throw new Error('还没有可打开的图片目录。');
+  const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
+  if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能打开 StoryForge 图片目录。');
+  const result = await shell.openPath(target);
+  if (result) throw new Error(result);
+  return { ok: true };
+});
+ipcMain.handle('seedream:show-item', (_event, rawPath) => {
+  const target = path.resolve(String(rawPath || '').trim());
+  const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
+  if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能查看 StoryForge 生成的图片。');
+  if (!target || !fs.existsSync(target)) throw new Error('本地图片不存在，可能已被移动或删除。');
+  shell.showItemInFolder(target);
+  return { ok: true };
 });
 
 const createWindow = () => {
