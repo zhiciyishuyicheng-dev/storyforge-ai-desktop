@@ -9,12 +9,37 @@ const {
   generateAndSave: generateSeedreamAndSave,
   testConnection: testSeedreamConnection,
 } = require('./seedream.cjs');
+const {
+  DEFAULT_MODEL: OPENAI_IMAGE_MODEL,
+  DEFAULT_QUALITY: OPENAI_IMAGE_DEFAULT_QUALITY,
+  DEFAULT_SIZE: OPENAI_IMAGE_DEFAULT_SIZE,
+  KNOWN_QUALITIES: OPENAI_IMAGE_QUALITIES,
+  KNOWN_SIZES: OPENAI_IMAGE_SIZES,
+  generateAndSave: generateOpenAIImageAndSave,
+  testConnection: testOpenAIImageConnection,
+} = require('./gpt-image.cjs');
+const {
+  DEFAULT_DURATION: SEEDANCE_DEFAULT_DURATION,
+  DEFAULT_MODEL: SEEDANCE_DEFAULT_MODEL,
+  DEFAULT_RATIO: SEEDANCE_DEFAULT_RATIO,
+  DEFAULT_RESOLUTION: SEEDANCE_DEFAULT_RESOLUTION,
+  KNOWN_DURATIONS: SEEDANCE_DURATIONS,
+  KNOWN_MODELS: SEEDANCE_MODELS,
+  KNOWN_RATIOS: SEEDANCE_RATIOS,
+  KNOWN_RESOLUTIONS: SEEDANCE_RESOLUTIONS,
+  createTask: createSeedanceTask,
+  downloadAndSave: downloadSeedanceAndSave,
+  getTask: getSeedanceTask,
+  testConnection: testSeedanceConnection,
+} = require('./seedance.cjs');
 
 const MODEL = 'deepseek-v4-pro';
 const API_URL = 'https://api.deepseek.com/chat/completions';
 
 function settingsPath() { return path.join(app.getPath('userData'), 'deepseek-settings.json'); }
 function seedreamSettingsPath() { return path.join(app.getPath('userData'), 'seedream-settings.json'); }
+function openAIImageSettingsPath() { return path.join(app.getPath('userData'), 'openai-image-settings.json'); }
+function seedanceSettingsPath() { return path.join(app.getPath('userData'), 'seedance-settings.json'); }
 
 function readStoredKey() {
   try {
@@ -52,6 +77,86 @@ function storeSeedreamSettings(apiKey, model, size) {
   if (!['2K', '4K'].includes(size)) throw new Error('请选择 2K 或 4K 图片尺寸。');
   const encryptedKey = safeStorage.encryptString(apiKey).toString('base64');
   fs.writeFileSync(seedreamSettingsPath(), JSON.stringify({ encryptedKey, model, size }, null, 2), 'utf8');
+}
+
+function readOpenAIImageSettings() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(openAIImageSettingsPath(), 'utf8'));
+    const apiKey = saved.encryptedKey && safeStorage.isEncryptionAvailable()
+      ? safeStorage.decryptString(Buffer.from(saved.encryptedKey, 'base64'))
+      : '';
+    return {
+      apiKey,
+      model: OPENAI_IMAGE_MODEL,
+      size: OPENAI_IMAGE_SIZES.some((item) => item.id === saved.size) ? saved.size : OPENAI_IMAGE_DEFAULT_SIZE,
+      quality: OPENAI_IMAGE_QUALITIES.some((item) => item.id === saved.quality) ? saved.quality : OPENAI_IMAGE_DEFAULT_QUALITY,
+    };
+  } catch {
+    return { apiKey: '', model: OPENAI_IMAGE_MODEL, size: OPENAI_IMAGE_DEFAULT_SIZE, quality: OPENAI_IMAGE_DEFAULT_QUALITY };
+  }
+}
+
+function storeOpenAIImageSettings(apiKey, size, quality) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('当前 Windows 环境无法启用安全加密存储。');
+  if (!OPENAI_IMAGE_SIZES.some((item) => item.id === size)) throw new Error('请选择受支持的 GPT Image 2 图片尺寸。');
+  if (!OPENAI_IMAGE_QUALITIES.some((item) => item.id === quality)) throw new Error('请选择受支持的 GPT Image 2 图片质量。');
+  const encryptedKey = safeStorage.encryptString(apiKey).toString('base64');
+  fs.writeFileSync(openAIImageSettingsPath(), JSON.stringify({ encryptedKey, model: OPENAI_IMAGE_MODEL, size, quality }, null, 2), 'utf8');
+}
+
+function readSeedanceSettings() {
+  const fallbackKey = readSeedreamSettings().apiKey;
+  try {
+    const saved = JSON.parse(fs.readFileSync(seedanceSettingsPath(), 'utf8'));
+    const storedKey = saved.encryptedKey && safeStorage.isEncryptionAvailable()
+      ? safeStorage.decryptString(Buffer.from(saved.encryptedKey, 'base64'))
+      : '';
+    return {
+      apiKey: storedKey || fallbackKey,
+      inheritedKey: !storedKey && Boolean(fallbackKey),
+      model: SEEDANCE_MODELS.some((item) => item.id === saved.model) ? saved.model : SEEDANCE_DEFAULT_MODEL,
+      ratio: SEEDANCE_RATIOS.includes(saved.ratio) ? saved.ratio : SEEDANCE_DEFAULT_RATIO,
+      resolution: SEEDANCE_RESOLUTIONS.includes(saved.resolution) ? saved.resolution : SEEDANCE_DEFAULT_RESOLUTION,
+      duration: SEEDANCE_DURATIONS.includes(Number(saved.duration)) ? Number(saved.duration) : SEEDANCE_DEFAULT_DURATION,
+      generateAudio: saved.generateAudio !== false,
+    };
+  } catch {
+    return {
+      apiKey: fallbackKey,
+      inheritedKey: Boolean(fallbackKey),
+      model: SEEDANCE_DEFAULT_MODEL,
+      ratio: SEEDANCE_DEFAULT_RATIO,
+      resolution: SEEDANCE_DEFAULT_RESOLUTION,
+      duration: SEEDANCE_DEFAULT_DURATION,
+      generateAudio: true,
+    };
+  }
+}
+
+function storeSeedanceSettings(apiKey, model, ratio, resolution, duration, generateAudio) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('当前 Windows 环境无法启用安全加密存储。');
+  if (!SEEDANCE_MODELS.some((item) => item.id === model)) throw new Error('请选择受支持的 Seedance 2.0 模型。');
+  if (!SEEDANCE_RATIOS.includes(ratio)) throw new Error('请选择受支持的视频比例。');
+  if (!SEEDANCE_RESOLUTIONS.includes(resolution)) throw new Error('请选择受支持的视频分辨率。');
+  if (!SEEDANCE_DURATIONS.includes(Number(duration))) throw new Error('视频时长必须为 4 到 15 秒。');
+  const encryptedKey = safeStorage.encryptString(apiKey).toString('base64');
+  fs.writeFileSync(seedanceSettingsPath(), JSON.stringify({
+    encryptedKey,
+    model,
+    ratio,
+    resolution,
+    duration: Number(duration),
+    generateAudio: Boolean(generateAudio),
+  }, null, 2), 'utf8');
+}
+
+function assertStoryForgePath(rawPath, kind = '文件') {
+  const target = path.resolve(String(rawPath || '').trim());
+  const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
+  if (!target || (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`))) {
+    throw new Error(`只能访问 StoryForge 生成的${kind}。`);
+  }
+  return target;
 }
 
 async function callDeepSeek(apiKey, messages, maxTokens = 24000) {
@@ -171,6 +276,138 @@ ipcMain.handle('seedream:generate-image', async (_event, rawTask) => {
     index: Number(rawTask?.index || 0),
   });
 });
+ipcMain.handle('openai-image:get-status', () => {
+  const settings = readOpenAIImageSettings();
+  return {
+    configured: Boolean(settings.apiKey),
+    model: settings.model,
+    size: settings.size,
+    quality: settings.quality,
+    sizes: OPENAI_IMAGE_SIZES,
+    qualities: OPENAI_IMAGE_QUALITIES,
+  };
+});
+ipcMain.handle('openai-image:save-settings', (_event, rawSettings) => {
+  const existing = readOpenAIImageSettings();
+  const apiKey = String(rawSettings?.apiKey || '').trim() || existing.apiKey;
+  const size = String(rawSettings?.size || OPENAI_IMAGE_DEFAULT_SIZE);
+  const quality = String(rawSettings?.quality || OPENAI_IMAGE_DEFAULT_QUALITY);
+  if (!apiKey) throw new Error('请输入 OpenAI API Key。');
+  storeOpenAIImageSettings(apiKey, size, quality);
+  return { configured: true, model: OPENAI_IMAGE_MODEL, size, quality, sizes: OPENAI_IMAGE_SIZES, qualities: OPENAI_IMAGE_QUALITIES };
+});
+ipcMain.handle('openai-image:test', async (_event, rawKey) => {
+  const existing = readOpenAIImageSettings();
+  const apiKey = String(rawKey || '').trim() || existing.apiKey;
+  if (!apiKey) throw new Error('请先输入 OpenAI API Key。');
+  await testOpenAIImageConnection(apiKey);
+  return { ok: true, model: OPENAI_IMAGE_MODEL };
+});
+ipcMain.handle('openai-image:generate-image', async (_event, rawTask) => {
+  const settings = readOpenAIImageSettings();
+  if (!settings.apiKey) throw new Error('尚未配置 OpenAI API Key。');
+  const size = String(rawTask?.size || settings.size);
+  const quality = String(rawTask?.quality || settings.quality);
+  if (!OPENAI_IMAGE_SIZES.some((item) => item.id === size)) throw new Error('GPT Image 2 图片尺寸不受支持。');
+  if (!OPENAI_IMAGE_QUALITIES.some((item) => item.id === quality)) throw new Error('GPT Image 2 图片质量不受支持。');
+  return generateOpenAIImageAndSave({
+    apiKey: settings.apiKey,
+    size,
+    quality,
+    prompt: String(rawTask?.prompt || ''),
+    outputRoot: app.getPath('documents'),
+    projectTitle: String(rawTask?.projectTitle || '未命名短剧项目'),
+    projectId: String(rawTask?.projectId || 'project'),
+    fileName: String(rawTask?.fileName || ''),
+    index: Number(rawTask?.index || 0),
+  });
+});
+ipcMain.handle('seedance:get-status', () => {
+  const settings = readSeedanceSettings();
+  return {
+    configured: Boolean(settings.apiKey),
+    inheritedKey: settings.inheritedKey,
+    model: settings.model,
+    ratio: settings.ratio,
+    resolution: settings.resolution,
+    duration: settings.duration,
+    generateAudio: settings.generateAudio,
+    models: SEEDANCE_MODELS,
+    ratios: SEEDANCE_RATIOS,
+    resolutions: SEEDANCE_RESOLUTIONS,
+    durations: SEEDANCE_DURATIONS,
+  };
+});
+ipcMain.handle('seedance:save-settings', (_event, rawSettings) => {
+  const existing = readSeedanceSettings();
+  const apiKey = String(rawSettings?.apiKey || '').trim() || existing.apiKey;
+  const model = String(rawSettings?.model || SEEDANCE_DEFAULT_MODEL);
+  const ratio = String(rawSettings?.ratio || SEEDANCE_DEFAULT_RATIO);
+  const resolution = String(rawSettings?.resolution || SEEDANCE_DEFAULT_RESOLUTION);
+  const duration = Number(rawSettings?.duration || SEEDANCE_DEFAULT_DURATION);
+  const generateAudio = rawSettings?.generateAudio !== false;
+  if (!apiKey) throw new Error('请输入火山方舟 API Key。');
+  storeSeedanceSettings(apiKey, model, ratio, resolution, duration, generateAudio);
+  return {
+    configured: true,
+    inheritedKey: false,
+    model,
+    ratio,
+    resolution,
+    duration,
+    generateAudio,
+    models: SEEDANCE_MODELS,
+    ratios: SEEDANCE_RATIOS,
+    resolutions: SEEDANCE_RESOLUTIONS,
+    durations: SEEDANCE_DURATIONS,
+  };
+});
+ipcMain.handle('seedance:test', async (_event, rawKey) => {
+  const existing = readSeedanceSettings();
+  const apiKey = String(rawKey || '').trim() || existing.apiKey;
+  if (!apiKey) throw new Error('请先输入火山方舟 API Key。');
+  await testSeedanceConnection(apiKey);
+  return { ok: true };
+});
+ipcMain.handle('seedance:create-task', async (_event, rawTask) => {
+  const settings = readSeedanceSettings();
+  if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
+  const imagePaths = Array.isArray(rawTask?.imagePaths)
+    ? rawTask.imagePaths.slice(0, 9).map((filePath) => assertStoryForgePath(filePath, '参考图'))
+    : [];
+  for (const filePath of imagePaths) {
+    if (!fs.existsSync(filePath)) throw new Error(`本地参考图不存在：${path.basename(filePath)}`);
+  }
+  return createSeedanceTask({
+    apiKey: settings.apiKey,
+    model: String(rawTask?.model || settings.model),
+    prompt: String(rawTask?.prompt || ''),
+    imagePaths,
+    ratio: String(rawTask?.ratio || settings.ratio),
+    resolution: String(rawTask?.resolution || settings.resolution),
+    duration: Number(rawTask?.duration || settings.duration),
+    generateAudio: rawTask?.generateAudio ?? settings.generateAudio,
+  });
+});
+ipcMain.handle('seedance:get-task', async (_event, rawTaskId) => {
+  const settings = readSeedanceSettings();
+  if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
+  return getSeedanceTask(settings.apiKey, rawTaskId);
+});
+ipcMain.handle('seedance:download-video', async (_event, rawTask) => {
+  const settings = readSeedanceSettings();
+  if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
+  const task = await getSeedanceTask(settings.apiKey, rawTask?.taskId);
+  if (!['succeeded', 'success'].includes(task.status) || !task.videoUrl) throw new Error('Seedance 视频任务尚未完成。');
+  return downloadSeedanceAndSave({
+    videoUrl: task.videoUrl,
+    outputRoot: app.getPath('documents'),
+    projectTitle: String(rawTask?.projectTitle || '未命名短剧项目'),
+    projectId: String(rawTask?.projectId || 'project'),
+    fileName: String(rawTask?.fileName || ''),
+    index: Number(rawTask?.index || 0),
+  });
+});
 ipcMain.handle('seedream:open-output', async (_event, rawPath) => {
   const target = path.resolve(String(rawPath || '').trim());
   if (!target) throw new Error('还没有可打开的图片目录。');
@@ -185,6 +422,18 @@ ipcMain.handle('seedream:show-item', (_event, rawPath) => {
   const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
   if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能查看 StoryForge 生成的图片。');
   if (!target || !fs.existsSync(target)) throw new Error('本地图片不存在，可能已被移动或删除。');
+  shell.showItemInFolder(target);
+  return { ok: true };
+});
+ipcMain.handle('seedance:open-output', async (_event, rawPath) => {
+  const target = assertStoryForgePath(rawPath, '视频目录');
+  const result = await shell.openPath(target);
+  if (result) throw new Error(result);
+  return { ok: true };
+});
+ipcMain.handle('seedance:show-item', (_event, rawPath) => {
+  const target = assertStoryForgePath(rawPath, '视频');
+  if (!fs.existsSync(target)) throw new Error('本地视频不存在，可能已被移动或删除。');
   shell.showItemInFolder(target);
   return { ok: true };
 });
