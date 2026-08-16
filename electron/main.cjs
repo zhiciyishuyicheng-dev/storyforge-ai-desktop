@@ -33,6 +33,9 @@ const {
   testConnection: testSeedanceConnection,
 } = require('./seedance.cjs');
 
+const SEEDANCE_DEFAULT_GENERATION_MODE = 'batch';
+const SEEDANCE_GENERATION_MODES = ['batch', 'confirm'];
+
 const MODEL = 'deepseek-v4-pro';
 const API_URL = 'https://api.deepseek.com/chat/completions';
 
@@ -118,6 +121,7 @@ function readSeedanceSettings() {
       ratio: SEEDANCE_RATIOS.includes(saved.ratio) ? saved.ratio : SEEDANCE_DEFAULT_RATIO,
       resolution: SEEDANCE_RESOLUTIONS.includes(saved.resolution) ? saved.resolution : SEEDANCE_DEFAULT_RESOLUTION,
       duration: SEEDANCE_DURATIONS.includes(Number(saved.duration)) ? Number(saved.duration) : SEEDANCE_DEFAULT_DURATION,
+      generationMode: SEEDANCE_GENERATION_MODES.includes(saved.generationMode) ? saved.generationMode : SEEDANCE_DEFAULT_GENERATION_MODE,
       generateAudio: saved.generateAudio !== false,
     };
   } catch {
@@ -128,17 +132,19 @@ function readSeedanceSettings() {
       ratio: SEEDANCE_DEFAULT_RATIO,
       resolution: SEEDANCE_DEFAULT_RESOLUTION,
       duration: SEEDANCE_DEFAULT_DURATION,
+      generationMode: SEEDANCE_DEFAULT_GENERATION_MODE,
       generateAudio: true,
     };
   }
 }
 
-function storeSeedanceSettings(apiKey, model, ratio, resolution, duration, generateAudio) {
+function storeSeedanceSettings(apiKey, model, ratio, resolution, duration, generationMode, generateAudio) {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('当前 Windows 环境无法启用安全加密存储。');
   if (!SEEDANCE_MODELS.some((item) => item.id === model)) throw new Error('请选择受支持的 Seedance 2.0 模型。');
   if (!SEEDANCE_RATIOS.includes(ratio)) throw new Error('请选择受支持的视频比例。');
   if (!SEEDANCE_RESOLUTIONS.includes(resolution)) throw new Error('请选择受支持的视频分辨率。');
   if (!SEEDANCE_DURATIONS.includes(Number(duration))) throw new Error('视频时长必须为 4 到 15 秒。');
+  if (!SEEDANCE_GENERATION_MODES.includes(generationMode)) throw new Error('请选择受支持的视频生成方式。');
   const encryptedKey = safeStorage.encryptString(apiKey).toString('base64');
   fs.writeFileSync(seedanceSettingsPath(), JSON.stringify({
     encryptedKey,
@@ -146,6 +152,7 @@ function storeSeedanceSettings(apiKey, model, ratio, resolution, duration, gener
     ratio,
     resolution,
     duration: Number(duration),
+    generationMode,
     generateAudio: Boolean(generateAudio),
   }, null, 2), 'utf8');
 }
@@ -331,6 +338,7 @@ ipcMain.handle('seedance:get-status', () => {
     ratio: settings.ratio,
     resolution: settings.resolution,
     duration: settings.duration,
+    generationMode: settings.generationMode,
     generateAudio: settings.generateAudio,
     models: SEEDANCE_MODELS,
     ratios: SEEDANCE_RATIOS,
@@ -345,9 +353,10 @@ ipcMain.handle('seedance:save-settings', (_event, rawSettings) => {
   const ratio = String(rawSettings?.ratio || SEEDANCE_DEFAULT_RATIO);
   const resolution = String(rawSettings?.resolution || SEEDANCE_DEFAULT_RESOLUTION);
   const duration = Number(rawSettings?.duration || SEEDANCE_DEFAULT_DURATION);
+  const generationMode = SEEDANCE_GENERATION_MODES.includes(rawSettings?.generationMode) ? rawSettings.generationMode : SEEDANCE_DEFAULT_GENERATION_MODE;
   const generateAudio = rawSettings?.generateAudio !== false;
   if (!apiKey) throw new Error('请输入火山方舟 API Key。');
-  storeSeedanceSettings(apiKey, model, ratio, resolution, duration, generateAudio);
+  storeSeedanceSettings(apiKey, model, ratio, resolution, duration, generationMode, generateAudio);
   return {
     configured: true,
     inheritedKey: false,
@@ -355,6 +364,7 @@ ipcMain.handle('seedance:save-settings', (_event, rawSettings) => {
     ratio,
     resolution,
     duration,
+    generationMode,
     generateAudio,
     models: SEEDANCE_MODELS,
     ratios: SEEDANCE_RATIOS,
