@@ -323,6 +323,7 @@ function appTemplate() {
       <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4 Pro</b><small>视频生成前的故事分析、分集大纲、剧本、分镜和视觉素材全部使用此模型。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
       <div class="modal-backdrop" id="imageSettingsModal" hidden><div class="settings-modal image-settings-modal"><div class="modal-head"><div><span class="section-kicker">IMAGE MODEL SETTINGS</span><h2>第五步生图设置</h2></div><button id="closeImageSettings">×</button></div><div class="image-provider-switch" role="tablist" aria-label="生图渠道"><button class="${imageProviderDraft === 'seedream' ? 'active' : ''}" data-image-provider="seedream" role="tab" aria-selected="${imageProviderDraft === 'seedream'}">Seedream 5.0</button><button class="${imageProviderDraft === 'openai' ? 'active' : ''}" data-image-provider="openai" role="tab" aria-selected="${imageProviderDraft === 'openai'}">GPT Image 2</button></div><div class="provider-panel" data-provider-panel="seedream" ${imageProviderDraft === 'seedream' ? '' : 'hidden'}><div class="model-lock seedream-lock"><span>火山方舟生图</span><b>Seedream 5.0</b><small>逐张生成角色、场景和道具参考图，并保存到“文档/StoryForge/项目名/项目编号/视觉素材”。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedreamKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedreamStatus.configured ? '密钥已加密保存；留空可只修改模型和尺寸。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>图片模型</span><select id="seedreamModel">${SEEDREAM_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedreamStatus.model ? 'selected' : ''}>${item.label}${item.pricePerImage ? ` · ¥${item.pricePerImage.toFixed(2)}/张` : ' · 需账号单独开通'}</option>`).join('')}</select><small>正式版和 Lite 都需要在火山方舟单独开通。</small></label><label class="key-field"><span>输出尺寸</span><select id="seedreamSize"><option value="2K" ${seedreamStatus.size === '2K' ? 'selected' : ''}>2K（推荐）</option><option value="4K" ${seedreamStatus.size === '4K' ? 'selected' : ''}>4K</option></select></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedream 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div></div><div class="provider-panel" data-provider-panel="openai" ${imageProviderDraft === 'openai' ? '' : 'hidden'}><div class="model-lock openai-image-lock"><span>OpenAI 生图</span><b>GPT Image 2</b><small>按参考图提示词生成 PNG 图片。复杂提示词最多可能需要约两分钟。</small></div><label class="key-field"><span>OpenAI API Key</span><input id="openAIImageKey" type="password" placeholder="sk-..." autocomplete="off"><small>${openAIImageStatus.configured ? '密钥已加密保存；留空可只修改尺寸和质量。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>输出尺寸</span><select id="openAIImageSize">${OPENAI_IMAGE_SIZES.map((item) => `<option value="${item.id}" ${item.id === openAIImageStatus.size ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>图片质量</span><select id="openAIImageQuality">${OPENAI_IMAGE_QUALITIES.map((item) => `<option value="${item.id}" ${item.id === openAIImageStatus.quality ? 'selected' : ''}>${item.label}</option>`).join('')}</select><small>高质量耗时和费用更高；费用以 OpenAI 控制台为准。</small></label><div class="key-links"><a class="key-help" href="https://platform.openai.com/api-keys" target="_blank">创建 OpenAI API Key ↗</a><a class="key-help" href="https://platform.openai.com/settings/organization/general" target="_blank">组织与验证设置 ↗</a></div></div><div class="modal-message" id="imageMessage"></div><div class="modal-actions"><button class="outline-button" id="testImageProvider">测试连接（不生图）</button><button class="primary-button" id="saveImageProvider">保存并使用</button></div></div></div>
       <div class="modal-backdrop" id="seedanceSettingsModal" hidden><div class="settings-modal seedance-settings-modal"><div class="modal-head"><div><span class="section-kicker">VIDEO MODEL SETTINGS</span><h2>第六步视频设置</h2></div><button id="closeSeedanceSettings">×</button></div><div class="model-lock seedance-video-lock"><span>火山方舟视频生成</span><b>Seedance 2.0</b><small>每个镜头优先使用第四步分镜中的时长，按需生成 4 至 15 秒视频；第五步参考图会按 @Image 编号自动引用。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedanceKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedanceStatus.configured ? (seedanceStatus.inheritedKey ? '当前复用 Seedream 的火山方舟密钥；留空即可继续使用。' : '密钥已加密保存；留空可只修改视频参数。') : '可复用 Seedream 的同一个火山方舟 API Key。'}</small></label><div class="seedance-setting-grid"><label class="key-field"><span>视频模型</span><select id="seedanceModel">${SEEDANCE_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedanceStatus.model ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>画面比例</span><select id="seedanceRatio">${SEEDANCE_RATIOS.map((item) => `<option value="${item}" ${item === seedanceStatus.ratio ? 'selected' : ''}>${item}${item === '9:16' ? '（竖屏推荐）' : ''}</option>`).join('')}</select></label><label class="key-field"><span>分辨率</span><select id="seedanceResolution">${SEEDANCE_RESOLUTIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.resolution ? 'selected' : ''}>${item}</option>`).join('')}</select></label><label class="key-field"><span>缺省时长</span><select id="seedanceDuration">${SEEDANCE_DURATIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.duration ? 'selected' : ''}>${item} 秒</option>`).join('')}</select><small>仅在分镜没有有效时长时使用。</small></label></div><div class="video-generation-mode-field"><span>生成方式</span><div class="video-generation-mode" role="tablist" aria-label="视频生成方式"><button class="${seedanceStatus.generationMode === 'confirm' ? '' : 'active'}" data-seedance-generation-mode="batch" role="tab" aria-selected="${seedanceStatus.generationMode !== 'confirm'}"><b>批量连续</b><small>一次确认，按顺序生成全部镜头</small></button><button class="${seedanceStatus.generationMode === 'confirm' ? 'active' : ''}" data-seedance-generation-mode="confirm" role="tab" aria-selected="${seedanceStatus.generationMode === 'confirm'}"><b>逐镜确认</b><small>每个镜头完成后暂停，确认后再生成下一个</small></button></div></div><label class="toggle-field"><input id="seedanceGenerateAudio" type="checkbox" ${seedanceStatus.generateAudio ? 'checked' : ''}><span><b>生成同步音频</b><small>让 Seedance 同时生成对白、人声、环境音和配乐。</small></span></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedance 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div><div class="modal-message" id="seedanceMessage"></div><div class="modal-actions"><button class="outline-button" id="testSeedance">测试连接（不生视频）</button><button class="primary-button" id="saveSeedance">保存设置</button></div></div></div>
+      <div class="modal-backdrop" id="customAssetModal" hidden><div class="settings-modal custom-asset-modal"><div class="modal-head"><div><span class="section-kicker">CUSTOM REFERENCE</span><h2>添加遗漏资源</h2></div><button id="closeCustomAsset">×</button></div><div class="model-lock local-custom-lock"><span>第五步本地素材</span><b>创建自定义上传项</b><small>适合补充主持人、医生、秘书、额外场景或遗漏道具。创建后立即选择本地参考图片。</small></div><label class="key-field"><span>资源名称</span><input id="customAssetName" type="text" placeholder="例如：主持人" autocomplete="off"></label><label class="key-field"><span>资源类型</span><select id="customAssetType"><option value="人物参考图">人物</option><option value="场景设定图">场景</option><option value="群像参考图">群像</option><option value="道具参考图">道具</option><option value="其他参考图">其他</option></select></label><div class="modal-message" id="customAssetMessage"></div><div class="modal-actions"><button class="outline-button" id="cancelCustomAsset">取消</button><button class="primary-button" id="createCustomAsset">创建并上传图片</button></div></div></div>
       <div class="toast" id="toast"></div>
     </div>`;
 }
@@ -350,9 +351,10 @@ function assetGenerationTemplate(output) {
     const previews = files.length
       ? `<div class="local-asset-previews">${files.map((file, fileIndex) => `<div class="local-asset-thumb"><button data-show-local-asset-index="${index}" data-show-local-file-index="${fileIndex}" title="在文件夹中查看"><img src="${esc(String(file.imageUrl || ''))}" alt="${esc(String(prompt.name || '参考图'))}"></button><span>${esc(String(file.sourceName || file.fileName || `图片${fileIndex + 1}`))}</span></div>`).join('')}</div>`
       : `<div class="asset-image-placeholder pending"><span>＋</span><small>请上传${esc(String(prompt.name || '参考图'))}</small></div>`;
-    return `<article class="generated-asset-card local-upload-card">${previews}<div class="generated-asset-copy"><div><span>${esc(String(prompt.type || '参考图'))}</span><h4>${esc(String(prompt.name || `参考图${index + 1}`))}</h4><code>${esc(String(prompt.fileName || ''))}</code></div><b class="asset-result-status ${files.length ? 'success' : 'pending'}">${esc(statusLabel)}</b><p class="local-upload-help">可上传 PNG、JPG、WEBP 或 BMP；同一角色或场景最多保留 9 张参考图。</p><div class="local-upload-actions"><button class="primary-button upload-local-asset" data-upload-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>${files.length ? '追加参考图' : '上传参考图'}</button>${files.length ? `<button class="outline-button clear-local-asset" data-clear-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>清空本项</button>` : ''}</div></div></article>`;
+    return `<article class="generated-asset-card local-upload-card">${previews}<div class="generated-asset-copy"><div><span>${esc(String(prompt.type || '参考图'))}${prompt.customAsset ? ' · 自定义' : ''}</span><h4>${esc(String(prompt.name || `参考图${index + 1}`))}</h4><code>${esc(String(prompt.fileName || ''))}</code></div><b class="asset-result-status ${files.length ? 'success' : 'pending'}">${esc(statusLabel)}</b><p class="local-upload-help">可上传 PNG、JPG、WEBP 或 BMP；同一角色或场景最多保留 9 张参考图。</p><div class="local-upload-actions"><button class="primary-button upload-local-asset" data-upload-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>${files.length ? '追加参考图' : '上传参考图'}</button>${files.length ? `<button class="outline-button clear-local-asset" data-clear-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>清空本项</button>` : ''}${prompt.customAsset ? `<button class="outline-button remove-custom-asset" data-remove-custom-asset-index="${index}" ${project.running ? 'disabled' : ''}>删除此项</button>` : ''}</div></div></article>`;
   }).join('');
-  return `<section class="seedream-generator local-assets-uploader"><div class="seedream-generator-head"><div><span class="section-kicker">LOCAL REFERENCE IMAGES</span><h4>第五步 · 上传本地参考图</h4><p>模型生图已暂停。请为下方每个人物、场景、群像和道具分别上传对应图片。</p></div><div class="seedream-actions">${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开素材文件夹</button>' : ''}<button class="primary-button" id="confirmLocalAssets" ${project.running || !prompts.length || missing ? 'disabled' : ''}>确认素材并进入第六步</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>上传文件会复制到当前项目的“视觉素材/本地上传”目录，重启软件后仍可继续使用。</small></div>${cards ? `<div class="generated-assets-grid">${cards}</div>` : ''}</section>`;
+  const customCard = `<button class="generated-asset-card add-custom-asset-card" id="addCustomAsset" ${project.running ? 'disabled' : ''}><span>＋</span><b>添加遗漏资源</b><small>自定义人物、场景、群像或道具，并上传对应参考图</small></button>`;
+  return `<section class="seedream-generator local-assets-uploader"><div class="seedream-generator-head"><div><span class="section-kicker">LOCAL REFERENCE IMAGES</span><h4>第五步 · 上传本地参考图</h4><p>模型生图已暂停。请为下方每个人物、场景、群像和道具分别上传对应图片。</p></div><div class="seedream-actions">${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开素材文件夹</button>' : ''}<button class="primary-button" id="confirmLocalAssets" ${project.running || !prompts.length || missing ? 'disabled' : ''}>确认素材并进入第六步</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>上传文件会复制到当前项目的“视觉素材/本地上传”目录，重启软件后仍可继续使用。</small></div><div class="generated-assets-grid">${cards}${customCard}</div></section>`;
 }
 
 function videoGenerationTemplate() {
@@ -691,9 +693,15 @@ function bindEvents() {
   document.querySelectorAll('[data-seedance-generation-mode]').forEach((button) => button.addEventListener('click', () => selectSeedanceGenerationModeDraft(button.dataset.seedanceGenerationMode)));
   document.querySelector('#configureSeedance')?.addEventListener('click', openSeedanceSettings);
   document.querySelector('#confirmLocalAssets')?.addEventListener('click', confirmLocalAssets);
+  document.querySelector('#addCustomAsset')?.addEventListener('click', openCustomAssetModal);
+  document.querySelector('#closeCustomAsset')?.addEventListener('click', closeCustomAssetModal);
+  document.querySelector('#cancelCustomAsset')?.addEventListener('click', closeCustomAssetModal);
+  document.querySelector('#customAssetModal')?.addEventListener('click', (event) => { if (event.target.id === 'customAssetModal') closeCustomAssetModal(); });
+  document.querySelector('#createCustomAsset')?.addEventListener('click', createCustomAsset);
   document.querySelector('#openAssetFolder')?.addEventListener('click', openAssetOutputFolder);
   document.querySelectorAll('[data-upload-local-asset-index]').forEach((button) => button.addEventListener('click', () => selectLocalAssetImages(Number(button.dataset.uploadLocalAssetIndex))));
   document.querySelectorAll('[data-clear-local-asset-index]').forEach((button) => button.addEventListener('click', () => clearLocalAssetImages(Number(button.dataset.clearLocalAssetIndex))));
+  document.querySelectorAll('[data-remove-custom-asset-index]').forEach((button) => button.addEventListener('click', () => removeCustomAsset(Number(button.dataset.removeCustomAssetIndex))));
   document.querySelectorAll('[data-show-local-asset-index]').forEach((button) => button.addEventListener('click', () => showLocalAssetImage(Number(button.dataset.showLocalAssetIndex), Number(button.dataset.showLocalFileIndex))));
   document.querySelector('#generateNextVideo')?.addEventListener('click', () => {
     const prompts = project.outputs.storyboard?.prompts || [];
@@ -1123,6 +1131,74 @@ function alignAssetGenerationItems(prompts) {
   state.status = state.generatedCount === prompts.length && prompts.length ? 'complete' : 'pending';
   project.assetGeneration = state;
   return state;
+}
+
+function openCustomAssetModal() {
+  const modal = document.querySelector('#customAssetModal');
+  if (!modal) return;
+  modal.hidden = false;
+  const nameInput = document.querySelector('#customAssetName');
+  if (nameInput) nameInput.value = '';
+  const typeInput = document.querySelector('#customAssetType');
+  if (typeInput) typeInput.value = '人物参考图';
+  setCustomAssetMessage('');
+  nameInput?.focus();
+}
+
+function closeCustomAssetModal() {
+  const modal = document.querySelector('#customAssetModal');
+  if (modal) modal.hidden = true;
+}
+
+function setCustomAssetMessage(message, type = '') {
+  const node = document.querySelector('#customAssetMessage');
+  if (!node) return;
+  node.textContent = message;
+  node.className = `modal-message ${type}`;
+}
+
+function customAssetFileName(type, name) {
+  const cleanName = String(name || '遗漏资源').replace(/[<>:"/\\|?*]/g, '_').trim();
+  const prefix = /人物/.test(type) ? '人物' : /场景/.test(type) ? '场景' : /群像/.test(type) ? '群像' : /道具/.test(type) ? '道具' : '自定义';
+  return `${prefix}-${cleanName}-参考图.png`;
+}
+
+async function createCustomAsset() {
+  const name = String(document.querySelector('#customAssetName')?.value || '').trim();
+  const type = String(document.querySelector('#customAssetType')?.value || '其他参考图');
+  if (!name) return setCustomAssetMessage('请输入资源名称，例如“主持人”。', 'error');
+  const prompts = project.outputs.assets?.promptItems || [];
+  if (prompts.some((item) => String(item.name || '').trim() === name)) return setCustomAssetMessage('已有同名资源，请直接在对应卡片上传图片。', 'error');
+  const customItem = {
+    name,
+    type,
+    fileName: customAssetFileName(type, name),
+    description: `用户补充的遗漏资源：${name}`,
+    prompt: '',
+    customAsset: true,
+  };
+  prompts.push(customItem);
+  project.outputs.assets.promptItems = prompts;
+  project.outputs.assets.subtitle = `${prompts.length} 项 · 包含用户补充的本地参考资源`;
+  project.completed = project.completed.filter((id) => id !== 'assets');
+  alignAssetGenerationItems(prompts);
+  closeCustomAssetModal();
+  saveProject(); render();
+  await selectLocalAssetImages(prompts.length - 1);
+}
+
+function removeCustomAsset(index) {
+  const prompts = project.outputs.assets?.promptItems || [];
+  if (!prompts[index]?.customAsset) return;
+  const removedName = prompts[index].name || '自定义资源';
+  prompts.splice(index, 1);
+  project.outputs.assets.promptItems = prompts;
+  project.outputs.assets.subtitle = `${prompts.length} 项 · 人物、场景、群像、道具与自定义资源`;
+  if (Array.isArray(project.assetGeneration?.items)) project.assetGeneration.items.splice(index, 1);
+  project.completed = project.completed.filter((id) => id !== 'assets');
+  alignAssetGenerationItems(prompts);
+  saveProject(); render();
+  showToast(`已删除自定义资源“${removedName}”，磁盘中的图片仍然保留`);
 }
 
 async function selectLocalAssetImages(index) {

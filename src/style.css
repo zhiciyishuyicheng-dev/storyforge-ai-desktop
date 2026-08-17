@@ -311,8 +311,16 @@ body { font-size:16px; }
 .local-asset-thumb button:hover img { transform:scale(1.03); }
 .local-asset-thumb span { display:block; overflow:hidden; padding:5px 6px; color:#747c85; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
 .generated-asset-copy .local-upload-help { min-height:34px; margin:9px 0 0; color:#747c85; }
-.local-upload-actions { display:flex; gap:7px; margin-top:10px; }
-.local-upload-actions button { flex:1; padding:9px 7px; font-size:11px; }
+.local-upload-actions { display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }
+.local-upload-actions button { flex:1 1 90px; padding:9px 7px; font-size:11px; }
+.add-custom-asset-card { min-height:300px; display:grid; place-content:center; justify-items:center; gap:9px; padding:26px; border:2px dashed #cfd9e2; background:#f9fbfc; color:#647684; text-align:center; }
+.add-custom-asset-card:hover { border-color:#8a70e8; background:#f8f6ff; color:#6c50d3; }
+.add-custom-asset-card span { width:52px; height:52px; display:grid; place-items:center; border-radius:15px; background:#fff; color:#7658df; font-size:25px; box-shadow:0 6px 18px #493b7b14; }
+.add-custom-asset-card b { margin-top:3px; font-size:15px; }
+.add-custom-asset-card small { max-width:190px; color:#89939b; font-size:11px; line-height:1.6; }
+.add-custom-asset-card:disabled { opacity:.55; cursor:wait; }
+.local-custom-lock { border-color:#d8e4ec; background:#f5f9fc; }
+.local-custom-lock span { color:#5c7d91; }
 @media (max-width:1200px) {
   .asset-checklist { grid-template-columns:1fr; }
   .asset-checklist > div:nth-child(odd) { border-right:0; }
