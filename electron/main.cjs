@@ -219,17 +219,37 @@ function validateWorkflow(data) {
   if (!Array.isArray(characters) || !characters.length) throw new Error('DeepSeek 未返回有效人物列表，请重试。');
   if (!Array.isArray(scenes) || !scenes.length) throw new Error('DeepSeek 未返回有效剧本场次，请重试。');
   if (!Array.isArray(shots) || shots.length < 3) throw new Error('DeepSeek 返回的分镜数量不足，请重试。');
+  if (!assets || !Array.isArray(assets.characters) || !Array.isArray(assets.scenes) || !Array.isArray(assets.groups) || !Array.isArray(assets.props)) throw new Error('DeepSeek 未返回完整的参考素材清单，请重试。');
+  const assetItems = [...assets.characters, ...assets.scenes, ...assets.groups, ...assets.props];
+  const assetNames = assetItems.map((item) => String(item?.name || '').trim());
+  if (assetNames.some((name) => !name)) throw new Error('DeepSeek 返回了缺少名称的参考素材，请重试。');
+  if (new Set(assetNames).size !== assetNames.length) throw new Error('DeepSeek 返回了同名参考素材，无法建立唯一绑定，请重试。');
+  const assetNameSet = new Set(assetNames);
   for (const shot of shots) {
     if (!Array.isArray(shot.uploads) || !shot.uploads.length || !Array.isArray(shot.segments) || !shot.segments.length || !shot.prompt) throw new Error(`镜头 ${shot.no || ''} 数据不完整，请重试。`);
+    if (shot.uploads.length > 9) throw new Error(`镜头 ${shot.no || ''} 超过九张参考图限制，请重试。`);
+    const refs = shot.uploads.map((upload) => Number(String(upload?.ref || '').match(/^@Image(\d+)$/i)?.[1] || 0));
+    if (refs.some((number, index) => number !== index + 1)) throw new Error(`镜头 ${shot.no || ''} 的 @Image 编号必须从一连续排列，请重试。`);
+    const promptRefs = [...String(shot.prompt).matchAll(/@Image(\d+)/gi)]
+      .map((match) => Number(match[1]))
+      .filter((number, index, values) => values.indexOf(number) === index)
+      .sort((left, right) => left - right);
+    if (promptRefs.length !== refs.length || refs.some((number, index) => promptRefs[index] !== number)) throw new Error(`镜头 ${shot.no || ''} 的提示词引用与上传计划不一致，请重试。`);
+    for (const upload of shot.uploads) {
+      const assetName = String(upload?.asset || '').trim();
+      const purpose = String(upload?.purpose || '').trim();
+      if (!assetName || !purpose || !assetNameSet.has(assetName)) throw new Error(`镜头 ${shot.no || ''} 引用了素材清单中不存在的名称“${assetName || '空名称'}”，请重试。`);
+      if (!String(shot.prompt).includes(assetName)) throw new Error(`镜头 ${shot.no || ''} 的提示词没有点名素材“${assetName}”，请重试。`);
+    }
     const withoutRefs = String(shot.prompt).replace(/@(Image|Video|Audio)\d+/g, '');
     if (/[A-Za-z]{2,}/.test(withoutRefs)) throw new Error(`镜头 ${shot.no || ''} 含有中英文混排，已拒绝本次结果，请重新生成。`);
   }
-  if (!Array.isArray(assets.characterChecklist) || !assets.characterChecklist.length) throw new Error('DeepSeek 未返回人物三视图生成清单，请重试。');
+  if (!Array.isArray(assets.characterChecklist) || !assets.characterChecklist.length) throw new Error('DeepSeek 未返回人物参考图清单，请重试。');
   if (!Array.isArray(assets.characterDifferenceMatrix) || !assets.characterDifferenceMatrix.length) throw new Error('DeepSeek 未返回人物差异化视觉锚点矩阵，请重试。');
   if (!Array.isArray(assets.characters) || assets.characters.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的人物参考图提示词不完整，请重试。');
-  const requiredCharacters = assets.characterChecklist.filter((item) => item.requiresTurnaround).map((item) => String(item.name || '').trim()).filter(Boolean);
+  const requiredCharacters = assets.characterChecklist.filter((item) => item.requiresReferenceImage ?? item.requiresTurnaround).map((item) => String(item.name || '').trim()).filter(Boolean);
   const renderedCharacters = new Set(assets.characters.map((item) => String(item.name || '').trim()));
-  if (requiredCharacters.some((name) => !renderedCharacters.has(name))) throw new Error('DeepSeek 漏掉了需要单独三视图的重要人物，请重试。');
+  if (requiredCharacters.some((name) => !renderedCharacters.has(name))) throw new Error('DeepSeek 漏掉了需要独立参考图的重要人物，请重试。');
   if (!Array.isArray(assets.scenes) || !assets.scenes.length || assets.scenes.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的场景参考图提示词不完整，请重试。');
   if (!Array.isArray(assets.props) || assets.props.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的道具参考图提示词不完整，请重试。');
 }
@@ -447,9 +467,23 @@ ipcMain.handle('seedance:test', async (_event, rawKey) => {
 ipcMain.handle('seedance:create-task', async (_event, rawTask) => {
   const settings = readSeedanceSettings();
   if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
-  const imagePaths = Array.isArray(rawTask?.imagePaths)
-    ? rawTask.imagePaths.slice(0, 9).map((filePath) => assertStoryForgePath(filePath, '参考图'))
-    : [];
+  const rawImageInputs = Array.isArray(rawTask?.imageInputs) && rawTask.imageInputs.length
+    ? rawTask.imageInputs
+    : Array.isArray(rawTask?.imagePaths) ? rawTask.imagePaths.map((localPath) => ({ localPath })) : [];
+  if (rawImageInputs.length > 9) throw new Error('单个 Seedance 任务最多只能提交 9 张参考图。');
+  const imageInputs = rawImageInputs.map((input, index) => {
+    const referenceNumber = Number(input?.referenceNumber || index + 1);
+    if (referenceNumber !== index + 1) throw new Error(`参考图顺序错误：请求位置 ${index + 1} 必须对应图片${index + 1}。`);
+    const assetId = String(input?.assetId || '').trim().replace(/^asset:\/\//i, '');
+    if (assetId) {
+      if (!/^asset-[a-z0-9-]+$/i.test(assetId)) throw new Error('可信素材 Asset ID 格式无效。');
+      return { assetId, localPath: '', referenceNumber };
+    }
+    const localPath = assertStoryForgePath(input?.localPath, '参考图');
+    if (!fs.existsSync(localPath)) throw new Error(`本地参考图不存在：${path.basename(localPath)}`);
+    return { assetId: '', localPath, referenceNumber };
+  });
+  const imagePaths = imageInputs.map((input) => input.localPath).filter(Boolean);
   for (const filePath of imagePaths) {
     if (!fs.existsSync(filePath)) throw new Error(`本地参考图不存在：${path.basename(filePath)}`);
   }
@@ -457,6 +491,7 @@ ipcMain.handle('seedance:create-task', async (_event, rawTask) => {
     apiKey: settings.apiKey,
     model: String(rawTask?.model || settings.model),
     prompt: String(rawTask?.prompt || ''),
+    imageInputs,
     imagePaths,
     ratio: String(rawTask?.ratio || settings.ratio),
     resolution: String(rawTask?.resolution || settings.resolution),

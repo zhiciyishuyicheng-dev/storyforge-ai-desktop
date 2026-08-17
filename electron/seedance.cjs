@@ -81,7 +81,11 @@ function validateOptions({ model, ratio, resolution, duration }) {
   if (!KNOWN_DURATIONS.includes(Number(duration))) throw new Error('Seedance 视频时长必须为 4 到 15 秒。');
 }
 
-async function createTask({ apiKey, model, prompt, imagePaths = [], ratio, resolution, duration, generateAudio = true }) {
+function normalizeTrustedAssetId(value) {
+  return String(value || '').trim().replace(/^asset:\/\//i, '');
+}
+
+async function createTask({ apiKey, model, prompt, imageInputs = [], imagePaths = [], ratio, resolution, duration, generateAudio = true }) {
   const normalized = {
     model: model || DEFAULT_MODEL,
     ratio: ratio || DEFAULT_RATIO,
@@ -91,12 +95,24 @@ async function createTask({ apiKey, model, prompt, imagePaths = [], ratio, resol
   validateOptions(normalized);
   const text = String(prompt || '').trim();
   if (!text) throw new Error('视频提示词不能为空。');
-  const uniqueImages = [...new Set(imagePaths.map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 9);
+  const requestedInputs = Array.isArray(imageInputs) && imageInputs.length
+    ? imageInputs
+    : imagePaths.map((localPath) => ({ localPath }));
+  if (requestedInputs.length > 9) throw new Error('单个 Seedance 任务最多只能提交 9 张参考图。');
+  const orderedImages = [];
+  for (let index = 0; index < requestedInputs.length; index += 1) {
+    const input = requestedInputs[index];
+    const assetId = normalizeTrustedAssetId(input?.assetId);
+    const localPath = String(input?.localPath || '').trim();
+    if (assetId && !/^asset-[a-z0-9-]+$/i.test(assetId)) throw new Error('可信素材 Asset ID 格式无效。');
+    if (!assetId && !localPath) throw new Error(`图片${index + 1}没有可提交的本地文件或可信素材。`);
+    orderedImages.push({ assetId, localPath });
+  }
   const content = [{ type: 'text', text }];
-  for (const filePath of uniqueImages) {
+  for (const input of orderedImages) {
     content.push({
       type: 'image_url',
-      image_url: { url: imageDataUrl(filePath) },
+      image_url: { url: input.assetId ? `asset://${input.assetId}` : imageDataUrl(input.localPath) },
       role: 'reference_image',
     });
   }
