@@ -1,12 +1,14 @@
-const { app, BrowserWindow, shell, ipcMain, safeStorage } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, safeStorage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
 const { SYSTEM_PROMPT, makeUserPrompt } = require('./deepseek-prompt.cjs');
 const {
   DEFAULT_MODEL: SEEDREAM_DEFAULT_MODEL,
   DEFAULT_SIZE: SEEDREAM_DEFAULT_SIZE,
   KNOWN_MODELS: SEEDREAM_MODELS,
   generateAndSave: generateSeedreamAndSave,
+  safeSegment,
   testConnection: testSeedreamConnection,
 } = require('./seedream.cjs');
 const {
@@ -38,6 +40,9 @@ const SEEDANCE_GENERATION_MODES = ['batch', 'confirm'];
 
 const MODEL = 'deepseek-v4-pro';
 const API_URL = 'https://api.deepseek.com/chat/completions';
+// 第五步暂时停用 Seedream / GPT Image 模型生图，改为用户上传本地参考图。
+const IMAGE_MODEL_GENERATION_ENABLED = false;
+const LOCAL_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
 
 function settingsPath() { return path.join(app.getPath('userData'), 'deepseek-settings.json'); }
 function seedreamSettingsPath() { return path.join(app.getPath('userData'), 'seedream-settings.json'); }
@@ -166,6 +171,17 @@ function assertStoryForgePath(rawPath, kind = '文件') {
   return target;
 }
 
+function uniqueLocalAssetPath(directory, baseName, extension) {
+  let attempt = 0;
+  let target;
+  do {
+    const suffix = attempt ? `-${attempt + 1}` : '';
+    target = path.join(directory, `${baseName}${suffix}${extension}`);
+    attempt += 1;
+  } while (fs.existsSync(target));
+  return target;
+}
+
 async function callDeepSeek(apiKey, messages, maxTokens = 24000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000);
@@ -265,6 +281,7 @@ ipcMain.handle('seedream:test', async (_event, rawKey) => {
   return { ok: true };
 });
 ipcMain.handle('seedream:generate-image', async (_event, rawTask) => {
+  if (!IMAGE_MODEL_GENERATION_ENABLED) throw new Error('第五步模型生图已暂停，请改用本地参考图上传。');
   const settings = readSeedreamSettings();
   if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
   const model = String(rawTask?.model || settings.model);
@@ -311,6 +328,7 @@ ipcMain.handle('openai-image:test', async (_event, rawKey) => {
   return { ok: true, model: OPENAI_IMAGE_MODEL };
 });
 ipcMain.handle('openai-image:generate-image', async (_event, rawTask) => {
+  if (!IMAGE_MODEL_GENERATION_ENABLED) throw new Error('第五步模型生图已暂停，请改用本地参考图上传。');
   const settings = readOpenAIImageSettings();
   if (!settings.apiKey) throw new Error('尚未配置 OpenAI API Key。');
   const size = String(rawTask?.size || settings.size);
@@ -328,6 +346,53 @@ ipcMain.handle('openai-image:generate-image', async (_event, rawTask) => {
     fileName: String(rawTask?.fileName || ''),
     index: Number(rawTask?.index || 0),
   });
+});
+ipcMain.handle('assets:select-local-images', async (_event, rawTask) => {
+  const selection = await dialog.showOpenDialog({
+    title: `为${String(rawTask?.assetName || '当前素材')}选择参考图片`,
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '参考图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+    ],
+  });
+  if (selection.canceled || !selection.filePaths.length) return { canceled: true, files: [] };
+
+  const directory = path.join(
+    app.getPath('documents'),
+    'StoryForge',
+    safeSegment(rawTask?.projectTitle, '未命名短剧项目'),
+    safeSegment(rawTask?.projectId, 'project'),
+    '视觉素材',
+    '本地上传',
+  );
+  fs.mkdirSync(directory, { recursive: true });
+  const assetName = safeSegment(`${rawTask?.assetType || '参考图'}-${rawTask?.assetName || `素材${Number(rawTask?.index || 0) + 1}`}`, '参考图');
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+  const files = selection.filePaths.slice(0, 9).map((sourcePath, fileIndex) => {
+    const extension = path.extname(sourcePath).toLowerCase();
+    if (!LOCAL_IMAGE_EXTENSIONS.has(extension)) throw new Error(`不支持的参考图格式：${extension || '未知格式'}`);
+    const targetPath = uniqueLocalAssetPath(directory, `${assetName}-${stamp}-${fileIndex + 1}`, extension);
+    fs.copyFileSync(sourcePath, targetPath);
+    return {
+      localPath: targetPath,
+      imageUrl: pathToFileURL(targetPath).href,
+      fileName: path.basename(targetPath),
+      sourceName: path.basename(sourcePath),
+    };
+  });
+  return { canceled: false, files, outputDirectory: directory };
+});
+ipcMain.handle('assets:open-output', async (_event, rawPath) => {
+  const target = assertStoryForgePath(rawPath, '图片目录');
+  const result = await shell.openPath(target);
+  if (result) throw new Error(result);
+  return { ok: true };
+});
+ipcMain.handle('assets:show-item', (_event, rawPath) => {
+  const target = assertStoryForgePath(rawPath, '参考图');
+  if (!fs.existsSync(target)) throw new Error('本地参考图不存在，可能已被移动或删除。');
+  shell.showItemInFolder(target);
+  return { ok: true };
 });
 ipcMain.handle('seedance:get-status', () => {
   const settings = readSeedanceSettings();

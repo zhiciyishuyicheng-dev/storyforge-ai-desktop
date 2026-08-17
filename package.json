@@ -2,7 +2,7 @@
   "name": "story-to-screen-studio",
   "productName": "StoryForge AI 短剧工坊",
   "private": true,
-  "version": "0.9.3",
+  "version": "0.10.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -22,7 +22,7 @@
     "appId": "com.storyforge.desktop",
     "productName": "StoryForge AI 短剧工坊",
     "directories": {
-      "output": "release-v0.9.3"
+      "output": "release-v0.10.0"
     },
     "files": [
       "dist/**/*",

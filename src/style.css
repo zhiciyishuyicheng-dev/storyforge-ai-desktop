@@ -301,6 +301,18 @@ body { font-size:16px; }
 .asset-result-status.generating { background:#f0ecff; color:#6e50d5; }
 .generate-one-asset { width:100%; margin-top:10px; font-size:11px; }
 .generate-one-asset:disabled { opacity:.55; cursor:wait; }
+.local-assets-account { cursor:default; }
+.local-assets-account .settings { font-size:10px; font-weight:700; }
+.local-assets-uploader { border-color:#d7e4ec; background:linear-gradient(135deg,#f8fbfd,#f3f8fb); }
+.local-asset-previews { min-height:170px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:3px; padding:3px; background:#e9eef2; }
+.local-asset-thumb { min-width:0; overflow:hidden; border-radius:5px; background:#fff; }
+.local-asset-thumb button { width:100%; aspect-ratio:1/1; display:block; overflow:hidden; background:#edf1f4; }
+.local-asset-thumb img { width:100%; height:100%; display:block; object-fit:cover; transition:transform .2s; }
+.local-asset-thumb button:hover img { transform:scale(1.03); }
+.local-asset-thumb span { display:block; overflow:hidden; padding:5px 6px; color:#747c85; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+.generated-asset-copy .local-upload-help { min-height:34px; margin:9px 0 0; color:#747c85; }
+.local-upload-actions { display:flex; gap:7px; margin-top:10px; }
+.local-upload-actions button { flex:1; padding:9px 7px; font-size:11px; }
 @media (max-width:1200px) {
   .asset-checklist { grid-template-columns:1fr; }
   .asset-checklist > div:nth-child(odd) { border-right:0; }

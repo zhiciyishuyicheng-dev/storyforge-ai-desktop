@@ -7,6 +7,8 @@ const LIBRARY_STORAGE_KEY = 'storyforge-project-library-v1';
 const IMAGE_PROVIDER_STORAGE_KEY = 'storyforge-image-provider-v1';
 const LIBRARY_SCHEMA_VERSION = 1;
 const SCHEMA_VERSION = 5;
+// 暂时关闭 Seedream / GPT Image 模型生图，第五步统一使用本地参考图上传。
+const IMAGE_MODEL_GENERATION_ENABLED = false;
 const SEEDREAM_DEFAULT_MODEL = 'doubao-seedream-5-0-lite-260128';
 const SEEDREAM_DEFAULT_SIZE = '2K';
 const SEEDREAM_MODELS = [
@@ -61,7 +63,7 @@ const defaultProject = {
   completed: [],
   outputs: {},
   seedanceMaterials: { images: 3, videos: 0, audios: 0 },
-  assetGeneration: { status: 'idle', provider: 'seedream', model: SEEDREAM_DEFAULT_MODEL, size: SEEDREAM_DEFAULT_SIZE, quality: '', items: [], outputDirectory: '', generatedCount: 0, totalCount: 0 },
+  assetGeneration: { status: 'idle', provider: 'local', model: '', size: '', quality: '', items: [], outputDirectory: '', generatedCount: 0, totalCount: 0 },
   videoGeneration: { status: 'idle', model: SEEDANCE_DEFAULT_MODEL, ratio: SEEDANCE_DEFAULT_RATIO, resolution: SEEDANCE_DEFAULT_RESOLUTION, duration: SEEDANCE_DEFAULT_DURATION, generationMode: SEEDANCE_DEFAULT_GENERATION_MODE, generateAudio: true, items: [], outputDirectory: '', generatedCount: 0, totalCount: 0, lastError: '' },
   running: false,
   createdAt: null,
@@ -109,6 +111,26 @@ function normalizeProject(saved) {
     ...(saved?.assetGeneration || {}),
     items: Array.isArray(saved?.assetGeneration?.items) ? saved.assetGeneration.items : [],
   };
+  migrated.assetGeneration.provider = 'local';
+  migrated.assetGeneration.items = migrated.assetGeneration.items.map((item) => {
+    const files = Array.isArray(item?.files) ? item.files.filter((file) => file?.localPath) : [];
+    if (!files.length && item?.localPath) {
+      files.push({
+        localPath: item.localPath,
+        imageUrl: item.imageUrl || '',
+        fileName: item.fileName || '',
+        sourceName: item.fileName || '',
+      });
+    }
+    return {
+      ...item,
+      files,
+      status: files.length ? 'success' : 'pending',
+      localPath: files[0]?.localPath || '',
+      imageUrl: files[0]?.imageUrl || '',
+      error: '',
+    };
+  });
   migrated.videoGeneration = {
     ...defaultProject.videoGeneration,
     ...(saved?.videoGeneration || {}),
@@ -266,7 +288,7 @@ function appTemplate() {
     ? '正在自动生成...'
     : project.activeStep === 'video'
       ? (project.outputs.video ? '重新生成视频' : '开始生成视频')
-      : (project.completed.length ? '自动生成到视频' : '开始自动生成');
+      : (project.completed.length ? '重新生成到参考图' : '开始生成前四步');
   return `
     <div class="shell">
       <aside class="sidebar">
@@ -285,17 +307,17 @@ function appTemplate() {
           <div class="sidebar-editor-head"><div><span class="section-kicker">INPUT</span><h2>剧本入口</h2></div><span class="format-label">TXT · MD</span></div>
           <div class="script-input-wrap ${project.script ? 'has-content' : ''}"><textarea id="scriptInput" placeholder="把小说改编后的剧本粘贴到这里...\n\n建议包含：集数、场景、人物和对白。${project.script ? '' : '\n\n还没有剧本？试试下方示例。'}">${esc(project.script)}</textarea><div class="textarea-footer"><span>${project.script.length ? `${project.script.length} 字` : '0 字'}</span><label class="upload-link" for="fileInput">↑ 导入文件</label><input type="file" id="fileInput" accept=".txt,.md" hidden /></div></div>
           <div class="sidebar-input-actions"><button class="sample-link" id="useDemo">加载示例 <span>↗</span></button><button class="primary-button" id="startGenerate" ${project.running ? 'disabled' : ''}><span class="sparkle">✦</span> ${generateLabel} <span>→</span></button></div>
-          <p class="auto-flow-note">前四步生成文案与分镜，第五步生成参考图，第六步由 Seedance 生成视频</p>
+          <p class="auto-flow-note">前四步生成文案与分镜，第五步上传本地参考图，第六步由 Seedance 生成视频</p>
         </section>
         <div class="sidebar-bottom">
           <button class="account" id="openSettings"><div class="avatar">深</div><div><b>DeepSeek V4 Pro</b><small>${deepseekStatus.configured ? '模型已连接' : '需要配置 API Key'}</small></div><span class="settings">⚙</span></button>
-          <button class="account seedream-account" id="openImageSettings"><div class="avatar seedream-avatar">图</div><div><b>${esc(imageName)}</b><small>${imageConfigured ? `${esc(imageDetail)}已连接` : `需要配置${imageProvider === 'openai' ? ' OpenAI' : '火山方舟'} API Key`}</small></div><span class="settings">⚙</span></button>
+          <div class="account seedream-account local-assets-account"><div class="avatar seedream-avatar">图</div><div><b>本地参考图</b><small>第五步按角色和场景上传</small></div><span class="settings">本地</span></div>
           <button class="account seedance-account" id="openSeedanceSettings"><div class="avatar seedance-video-avatar">视</div><div><b>${esc(videoModelName)}</b><small>${seedanceStatus.configured ? `${esc(seedanceStatus.ratio)} · ${esc(seedanceStatus.resolution)} · ${seedanceStatus.generationMode === 'confirm' ? '逐镜确认' : '批量连续'}` : '需要配置火山方舟 API Key'}</small></div><span class="settings">⚙</span></button>
         </div>
       </aside>
       <main class="main">
         <header class="topbar"><div class="breadcrumbs"><span>工作台</span><i>/</i><b>${esc(project.title)}</b></div><div class="top-actions"><span class="saved"><span class="saved-dot"></span> 已自动保存</span><button class="icon-button" title="字体缩放：Ctrl + / Ctrl - / Ctrl 0">A</button><button class="transfer-button" id="importProject">导入项目</button><button class="export-button" id="exportProject">导出项目 <span>↓</span></button><input type="file" id="projectFileInput" accept=".json,application/json" hidden /></div></header>
-        <section class="hero"><div><div class="eyebrow">AI SHORT DRAMA STUDIO</div><h1>把故事，变成一部短剧。</h1><p>DeepSeek 生成剧本与分镜，图片模型制作参考图，Seedance 2.0 按镜头生成有声视频并保存到本机。</p></div><div class="hero-meta"><button class="status-pill model-status ${deepseekStatus.configured ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${deepseekStatus.checking ? '正在检查模型' : deepseekStatus.configured ? 'DeepSeek 已连接' : '配置 DeepSeek'}</button><button class="status-pill model-status ${imageConfigured ? 'connected' : 'disconnected'}" id="heroImageStatus"><i></i> ${imageStatus.checking ? '正在检查生图模型' : imageConfigured ? `${esc(imageName)} 已连接` : `配置 ${esc(imageName)}`}</button><button class="status-pill model-status ${seedanceStatus.configured ? 'connected' : 'disconnected'}" id="heroSeedanceStatus"><i></i> ${seedanceStatus.checking ? '正在检查视频模型' : seedanceStatus.configured ? `${esc(videoModelName)} 已连接` : '配置 Seedance'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
+        <section class="hero"><div><div class="eyebrow">AI SHORT DRAMA STUDIO</div><h1>把故事，变成一部短剧。</h1><p>DeepSeek 生成剧本与分镜，第五步上传本地参考图，Seedance 2.0 支持逐镜或批量生成视频。</p></div><div class="hero-meta"><button class="status-pill model-status ${deepseekStatus.configured ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${deepseekStatus.checking ? '正在检查模型' : deepseekStatus.configured ? 'DeepSeek 已连接' : '配置 DeepSeek'}</button><span class="status-pill model-status connected"><i></i> 本地参考图模式</span><button class="status-pill model-status ${seedanceStatus.configured ? 'connected' : 'disconnected'}" id="heroSeedanceStatus"><i></i> ${seedanceStatus.checking ? '正在检查视频模型' : seedanceStatus.configured ? `${esc(videoModelName)} 已连接` : '配置 Seedance'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
         <section class="output-card card"><div class="card-head output-head"><div><span class="section-kicker">OUTPUT</span><h2>生成结果</h2></div><div class="output-tools"><button class="small-button" id="clearOutput">清空结果</button><button class="small-button" id="copyOutput">复制当前结果</button></div></div><div id="outputArea">${outputTemplate()}</div></section>
       </main>
       <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4 Pro</b><small>视频生成前的故事分析、分集大纲、剧本、分镜和视觉素材全部使用此模型。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
@@ -315,38 +337,22 @@ function stepTemplate(step) {
 
 function assetGenerationTemplate(output) {
   const prompts = Array.isArray(output?.promptItems) ? output.promptItems : [];
-  const state = project.assetGeneration || defaultProject.assetGeneration;
-  const provider = imageProvider;
-  const providerStatus = activeImageStatus(provider);
+  const state = alignAssetGenerationItems(prompts);
   const items = Array.isArray(state.items) ? state.items : [];
-  const completed = items.filter((item) => item.status === 'success').length;
-  const failed = items.filter((item) => item.status === 'failed').length;
+  const completed = items.filter((item) => Array.isArray(item.files) && item.files.length).length;
+  const missing = Math.max(0, prompts.length - completed);
   const progress = prompts.length ? Math.round((completed / prompts.length) * 100) : 0;
-  const modelInfo = provider === 'seedream' ? SEEDREAM_MODELS.find((item) => item.id === providerStatus.model) : null;
-  const priceText = provider === 'openai'
-    ? `${prompts.length} 张，费用以 OpenAI 控制台为准`
-    : modelInfo?.pricePerImage
-      ? `预计 ¥${(prompts.length * modelInfo.pricePerImage).toFixed(2)}（${prompts.length} 张 × ¥${modelInfo.pricePerImage.toFixed(2)}）`
-      : `${prompts.length} 张，费用以火山方舟控制台为准`;
-  const statusText = state.status === 'running'
-    ? `正在生成 ${Math.min(completed + 1, prompts.length)} / ${prompts.length}`
-    : completed === prompts.length && prompts.length
-      ? `已完成 ${completed} / ${prompts.length}`
-      : failed
-        ? `已完成 ${completed} 张，失败 ${failed} 张`
-        : `等待生成 ${prompts.length} 张`;
+  const statusText = missing ? `已上传 ${completed} / ${prompts.length} 项，还缺 ${missing} 项` : `全部 ${completed} 项参考图已准备完成`;
   const cards = prompts.map((prompt, index) => {
-    const result = items[index] || { status: 'pending' };
-    const statusLabel = { pending: '待生成', generating: '生成中', success: '已保存', failed: '生成失败' }[result.status] || '待生成';
-    const preview = result.status === 'success' && result.imageUrl
-      ? `<button class="asset-image-preview" data-show-asset-index="${index}" title="在文件夹中查看"><img src="${esc(String(result.imageUrl))}" alt="${esc(String(prompt.name || '参考图'))}"></button>`
-      : `<div class="asset-image-placeholder ${result.status}"><span>${result.status === 'generating' ? '✦' : result.status === 'failed' ? '!' : '图'}</span><small>${esc(statusLabel)}</small></div>`;
-    return `<article class="generated-asset-card">${preview}<div class="generated-asset-copy"><div><span>${esc(String(prompt.type || '参考图'))}</span><h4>${esc(String(prompt.name || `参考图${index + 1}`))}</h4><code>${esc(String(result.fileName || prompt.fileName || ''))}</code></div><b class="asset-result-status ${result.status}">${statusLabel}</b>${result.error ? `<p>${esc(cleanRemoteError(result.error, '生成失败'))}</p>` : ''}<button class="outline-button generate-one-asset" data-generate-asset-index="${index}" ${project.running ? 'disabled' : ''}>${result.status === 'success' ? '重新生成此图' : result.status === 'failed' ? '重试此图' : '生成此图'}</button></div></article>`;
+    const result = items[index] || { status: 'pending', files: [] };
+    const files = Array.isArray(result.files) ? result.files : [];
+    const statusLabel = files.length ? `已上传 ${files.length} 张` : '等待上传';
+    const previews = files.length
+      ? `<div class="local-asset-previews">${files.map((file, fileIndex) => `<div class="local-asset-thumb"><button data-show-local-asset-index="${index}" data-show-local-file-index="${fileIndex}" title="在文件夹中查看"><img src="${esc(String(file.imageUrl || ''))}" alt="${esc(String(prompt.name || '参考图'))}"></button><span>${esc(String(file.sourceName || file.fileName || `图片${fileIndex + 1}`))}</span></div>`).join('')}</div>`
+      : `<div class="asset-image-placeholder pending"><span>＋</span><small>请上传${esc(String(prompt.name || '参考图'))}</small></div>`;
+    return `<article class="generated-asset-card local-upload-card">${previews}<div class="generated-asset-copy"><div><span>${esc(String(prompt.type || '参考图'))}</span><h4>${esc(String(prompt.name || `参考图${index + 1}`))}</h4><code>${esc(String(prompt.fileName || ''))}</code></div><b class="asset-result-status ${files.length ? 'success' : 'pending'}">${esc(statusLabel)}</b><p class="local-upload-help">可上传 PNG、JPG、WEBP 或 BMP；同一角色或场景最多保留 9 张参考图。</p><div class="local-upload-actions"><button class="primary-button upload-local-asset" data-upload-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>${files.length ? '追加参考图' : '上传参考图'}</button>${files.length ? `<button class="outline-button clear-local-asset" data-clear-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>清空本项</button>` : ''}</div></div></article>`;
   }).join('');
-  const modelDetail = provider === 'openai'
-    ? `${imageProviderLabel(provider)} · ${imageSizeLabel(provider, providerStatus)} · ${imageQualityLabel(providerStatus.quality)}`
-    : `${imageProviderLabel(provider)} · ${providerStatus.size}`;
-  return `<section class="seedream-generator"><div class="seedream-generator-head"><div><span class="section-kicker">AI IMAGE GENERATION</span><h4>第五步 · 生成真实参考图</h4><p>${esc(modelDetail)} · ${esc(priceText)}</p></div><div class="seedream-actions"><button class="outline-button" id="configureImageProvider">生图设置</button>${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开图片文件夹</button>' : ''}<button class="primary-button" id="generateAllAssets" ${project.running || !prompts.length ? 'disabled' : ''}>${failed ? '重试失败图片' : completed ? '继续生成' : '开始生成全部图片'}</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i>${!providerStatus.configured ? `<small>尚未配置${provider === 'openai' ? ' OpenAI' : '火山方舟'} API Key，配置后即可开始真实生图。</small>` : '<small>生成时请保持程序开启。成功图片不会因单张失败而丢失。</small>'}${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div>${cards ? `<div class="generated-assets-grid">${cards}</div>` : ''}</section>`;
+  return `<section class="seedream-generator local-assets-uploader"><div class="seedream-generator-head"><div><span class="section-kicker">LOCAL REFERENCE IMAGES</span><h4>第五步 · 上传本地参考图</h4><p>模型生图已暂停。请为下方每个人物、场景、群像和道具分别上传对应图片。</p></div><div class="seedream-actions">${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开素材文件夹</button>' : ''}<button class="primary-button" id="confirmLocalAssets" ${project.running || !prompts.length || missing ? 'disabled' : ''}>确认素材并进入第六步</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>上传文件会复制到当前项目的“视觉素材/本地上传”目录，重启软件后仍可继续使用。</small></div>${cards ? `<div class="generated-assets-grid">${cards}</div>` : ''}</section>`;
 }
 
 function videoGenerationTemplate() {
@@ -386,21 +392,16 @@ function videoGenerationTemplate() {
       : `<div class="video-clip-placeholder ${esc(String(item.status || 'pending'))}"><span>${['creating', 'queued', 'running', 'downloading'].includes(item.status) ? '▶' : item.status === 'failed' ? '!' : String(index + 1).padStart(2, '0')}</span><b>${esc(label)}</b>${item.taskId ? `<small>${esc(String(item.taskId))}</small>` : ''}</div>`;
     return `<article class="video-clip-card">${media}<div class="video-clip-copy"><div><span>镜头 ${String(index + 1).padStart(2, '0')} · ${duration} 秒</span><h4>${esc(String(item.fileName || `镜头-${String(index + 1).padStart(2, '0')}.mp4`))}</h4><p>${esc(String(prompt).replace(/\s+/g, ' ').slice(0, 120))}</p></div><b class="video-task-status ${esc(String(item.status || 'pending'))}">${esc(label)}</b>${item.error ? `<div class="video-task-error">${esc(cleanRemoteError(item.error, '生成失败'))}</div>` : ''}<button class="outline-button generate-one-video" data-generate-video-index="${index}" ${project.running ? 'disabled' : ''}>${item.status === 'success' ? '重新生成此镜头' : item.status === 'failed' ? '重试此镜头' : '生成此镜头'}</button></div></article>`;
   }).join('');
-  const generationButtonText = confirmMode
-    ? allComplete
-      ? '全部视频已完成'
-      : nextItem?.status === 'failed'
-        ? `重试镜头 ${String(nextIndex + 1).padStart(2, '0')}`
-        : completed
-          ? `确认并生成镜头 ${String(nextIndex + 1).padStart(2, '0')}`
-          : '生成第一个镜头'
-    : failed ? '重试失败镜头' : completed ? '继续生成' : '开始生成全部视频';
+  const nextButtonText = allComplete
+    ? '全部视频已完成'
+    : nextItem?.status === 'failed'
+      ? `重试镜头 ${String(nextIndex + 1).padStart(2, '0')}`
+      : `生成下一个镜头 ${String(nextIndex + 1).padStart(2, '0')}`;
+  const batchButtonText = failed ? '批量重试失败镜头' : completed ? '批量继续生成' : '批量生成全部视频';
   const progressHelp = !seedanceStatus.configured
     ? '尚未配置火山方舟 API Key，配置后即可调用 Seedance 2.0。'
-    : confirmMode
-      ? '逐镜确认模式：每个镜头生成并下载后自动暂停，点击确认才会提交下一个任务。'
-      : '批量连续模式：按分镜顺序自动生成并下载全部视频。';
-  return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第六步 · Seedance 分镜视频</h4><p>${esc(seedanceModelLabel(state.model || seedanceStatus.model))} · ${esc(state.ratio || seedanceStatus.ratio)} · ${esc(state.resolution || seedanceStatus.resolution)} · ${confirmMode ? '逐镜确认' : '批量连续'} · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(generationButtonText)}</button></div></div><div class="seedance-video-progress ${confirmMode ? 'confirm-mode' : ''}"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
+    : '可以“生成下一个镜头”，也可以“一键批量生成”；每张镜头卡仍可单独生成或重试。';
+  return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第六步 · Seedance 分镜视频</h4><p>${esc(seedanceModelLabel(state.model || seedanceStatus.model))} · ${esc(state.ratio || seedanceStatus.ratio)} · ${esc(state.resolution || seedanceStatus.resolution)} · 支持逐镜与批量 · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="outline-button" id="generateNextVideo" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(nextButtonText)}</button><button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(batchButtonText)}</button></div></div><div class="seedance-video-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
 }
 
 function storyboardShotDuration(index, prompt, fallback = seedanceStatus.duration) {
@@ -427,8 +428,8 @@ function videoDurationSummary(prompts, items = [], fallback = seedanceStatus.dur
 
 function outputTemplate() {
   const output = project.outputs[project.activeStep];
-  if (project.running && !output) return `<div class="generating"><div class="generating-orb">✦</div><h3>正在生成${steps[currentIndex()].label}...</h3><p>${currentIndex() < 5 ? `自动流程第 ${currentIndex() + 1} / 5 步，完成后将自动进入下一阶段` : '正在合成视频、配音与字幕'}</p><div class="generating-track"><i></i></div><small>无需手动确认，请保持程序开启</small></div>`;
-  if (project.activeStep === 'video' && !output && steps.slice(0, 5).every((step) => project.completed.includes(step.id))) return `<div class="video-ready"><div class="video-ready-icon">▶</div><span class="section-kicker">READY FOR SEEDANCE</span><h3>参考图和分镜已经准备完成</h3><p>Seedance 将逐镜生成有声视频并保存到本机。视频生成会消耗火山方舟额度，请确认设置后开始。</p><div class="video-ready-actions"><button class="outline-button" id="configureSeedance">视频设置</button><button class="next-button" id="generateVideo">开始生成视频 <span>→</span></button></div></div>`;
+  if (project.running && !output) return `<div class="generating"><div class="generating-orb">✦</div><h3>正在生成${steps[currentIndex()].label}...</h3><p>${currentIndex() < 4 ? `文案流程第 ${currentIndex() + 1} / 4 步，完成后进入本地参考图上传` : '正在生成并下载视频镜头'}</p><div class="generating-track"><i></i></div><small>请保持程序开启</small></div>`;
+  if (project.activeStep === 'video' && !output && steps.slice(0, 5).every((step) => project.completed.includes(step.id))) return `<div class="video-ready"><div class="video-ready-icon">▶</div><span class="section-kicker">READY FOR SEEDANCE</span><h3>本地参考图和分镜已经准备完成</h3><p>Seedance 支持单独生成一个镜头或批量生成全部镜头，并将完成的视频保存到本机。</p><div class="video-ready-actions"><button class="outline-button" id="configureSeedance">视频设置</button><button class="next-button" id="generateVideo">进入视频生成 <span>→</span></button></div></div>`;
   if (!output) return `<div class="empty-output"><div class="empty-icon">✧</div><h3>准备好开始创作了吗？</h3><p>输入一段剧本，点击“开始生成”，你的短剧工作流会从这里展开。</p><button class="outline-button" id="emptyStart">使用示例开始 <span>→</span></button></div>`;
   const isAssets = project.activeStep === 'assets';
   const isVideo = project.activeStep === 'video';
@@ -437,7 +438,7 @@ function outputTemplate() {
   const videoDurationText = isVideo ? videoDurationSummary(project.outputs.storyboard?.prompts || [], project.videoGeneration?.items || [], project.videoGeneration?.duration) : '';
   const videoGenerationModeText = effectiveVideoGenerationMode() === 'confirm' ? '逐镜确认' : '批量连续';
   const body = `${isAssets ? assetGenerationTemplate(output) : ''}${isVideo ? videoGenerationTemplate() : ''}${output.body || ''}`;
-  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''} ${isVideo ? 'video-generation-layout' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(output.title)}</h3><p>${esc(output.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>${isVideo ? '镜头时长' : '预计耗时'}</span><b>${isVideo ? esc(videoDurationText) : output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? '<div class="side-stat vertical"><span>分镜规范</span><b>即梦二点零</b><small>按剧情动态分配<br>素材引用已分配</small></div>' : ''}${isAssets ? `<div class="side-stat vertical"><span>生图模型</span><b>${esc(imageProviderLabel())}</b><small>${esc(imageSizeLabel())} · 本机自动保存</small></div>` : ''}${isVideo ? `<div class="side-stat vertical"><span>视频模型</span><b>${esc(seedanceModelLabel(project.videoGeneration?.model))}</b><small>${esc(project.videoGeneration?.ratio || seedanceStatus.ratio)} · ${esc(project.videoGeneration?.resolution || seedanceStatus.resolution)}<br>${esc(videoGenerationModeText)} · 逐镜保存 MP4</small></div>` : ''}<button class="outline-button full" id="rerunStep">${isVideo ? (videoGenerationModeText === '逐镜确认' ? '从头逐镜重新生成' : '重新生成全部视频') : '重新生成'} <span>↻</span></button>${isVideo ? '<div class="auto-note">成功镜头已保存到本机，可单独重试失败任务。</div>' : stageComplete ? '<div class="auto-note"><i>✓</i> 已自动确认并继续流程</div>' : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
+  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''} ${isVideo ? 'video-generation-layout' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(output.title)}</h3><p>${esc(output.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>${isVideo ? '镜头时长' : '预计耗时'}</span><b>${isVideo ? esc(videoDurationText) : output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? '<div class="side-stat vertical"><span>分镜规范</span><b>即梦二点零</b><small>按剧情动态分配<br>素材引用已分配</small></div>' : ''}${isAssets ? '<div class="side-stat vertical"><span>素材方式</span><b>本地上传</b><small>按人物、场景和道具分别上传<br>模型生图暂时关闭</small></div>' : ''}${isVideo ? `<div class="side-stat vertical"><span>视频模型</span><b>${esc(seedanceModelLabel(project.videoGeneration?.model))}</b><small>${esc(project.videoGeneration?.ratio || seedanceStatus.ratio)} · ${esc(project.videoGeneration?.resolution || seedanceStatus.resolution)}<br>逐镜或批量 · 保存 MP4</small></div>` : ''}<button class="outline-button full" id="rerunStep">${isVideo ? '重新生成全部视频' : '重新生成'} <span>↻</span></button>${isVideo ? '<div class="auto-note">成功镜头已保存到本机，可逐个生成或批量继续。</div>' : stageComplete ? '<div class="auto-note"><i>✓</i> 已确认本地参考图</div>' : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
 }
 
 function makeOutput(id) {
@@ -669,35 +670,41 @@ function bindEvents() {
   document.querySelector('#rerunStep')?.addEventListener('click', () => startGeneration(project.activeStep === 'video' ? 'force-video' : true));
   document.querySelector('#generateVideo')?.addEventListener('click', () => startGeneration());
   document.querySelector('#openSettings').addEventListener('click', openModelSettings);
-  document.querySelector('#openImageSettings').addEventListener('click', openImageSettings);
+  document.querySelector('#openImageSettings')?.addEventListener('click', openImageSettings);
   document.querySelector('#openSeedanceSettings').addEventListener('click', openSeedanceSettings);
   document.querySelector('#heroModelStatus').addEventListener('click', openModelSettings);
-  document.querySelector('#heroImageStatus').addEventListener('click', openImageSettings);
+  document.querySelector('#heroImageStatus')?.addEventListener('click', openImageSettings);
   document.querySelector('#heroSeedanceStatus').addEventListener('click', openSeedanceSettings);
   document.querySelector('#closeSettings').addEventListener('click', closeModelSettings);
   document.querySelector('#settingsModal').addEventListener('click', (event) => { if (event.target.id === 'settingsModal') closeModelSettings(); });
   document.querySelector('#saveDeepSeek').addEventListener('click', saveDeepSeekSettings);
   document.querySelector('#testDeepSeek').addEventListener('click', testDeepSeekConnection);
-  document.querySelector('#closeImageSettings').addEventListener('click', closeImageSettings);
-  document.querySelector('#imageSettingsModal').addEventListener('click', (event) => { if (event.target.id === 'imageSettingsModal') closeImageSettings(); });
+  document.querySelector('#closeImageSettings')?.addEventListener('click', closeImageSettings);
+  document.querySelector('#imageSettingsModal')?.addEventListener('click', (event) => { if (event.target.id === 'imageSettingsModal') closeImageSettings(); });
   document.querySelectorAll('[data-image-provider]').forEach((button) => button.addEventListener('click', () => selectImageProviderDraft(button.dataset.imageProvider)));
-  document.querySelector('#saveImageProvider').addEventListener('click', saveImageSettings);
-  document.querySelector('#testImageProvider').addEventListener('click', testImageConnection);
+  document.querySelector('#saveImageProvider')?.addEventListener('click', saveImageSettings);
+  document.querySelector('#testImageProvider')?.addEventListener('click', testImageConnection);
   document.querySelector('#closeSeedanceSettings').addEventListener('click', closeSeedanceSettings);
   document.querySelector('#seedanceSettingsModal').addEventListener('click', (event) => { if (event.target.id === 'seedanceSettingsModal') closeSeedanceSettings(); });
   document.querySelector('#saveSeedance').addEventListener('click', saveSeedanceSettings);
   document.querySelector('#testSeedance').addEventListener('click', testSeedanceConnection);
   document.querySelectorAll('[data-seedance-generation-mode]').forEach((button) => button.addEventListener('click', () => selectSeedanceGenerationModeDraft(button.dataset.seedanceGenerationMode)));
-  document.querySelector('#configureImageProvider')?.addEventListener('click', openImageSettings);
   document.querySelector('#configureSeedance')?.addEventListener('click', openSeedanceSettings);
-  document.querySelector('#generateAllAssets')?.addEventListener('click', () => generateImageAssets({ token: ++generationRun, autoAdvance: true }));
+  document.querySelector('#confirmLocalAssets')?.addEventListener('click', confirmLocalAssets);
   document.querySelector('#openAssetFolder')?.addEventListener('click', openAssetOutputFolder);
-  document.querySelectorAll('[data-show-asset-index]').forEach((button) => button.addEventListener('click', () => showGeneratedAsset(Number(button.dataset.showAssetIndex))));
-  document.querySelectorAll('[data-generate-asset-index]').forEach((button) => button.addEventListener('click', () => generateImageAssets({ token: ++generationRun, indexes: [Number(button.dataset.generateAssetIndex)], autoAdvance: false })));
-  document.querySelector('#generateAllVideos')?.addEventListener('click', () => generateSeedanceVideos({ token: ++generationRun }));
+  document.querySelectorAll('[data-upload-local-asset-index]').forEach((button) => button.addEventListener('click', () => selectLocalAssetImages(Number(button.dataset.uploadLocalAssetIndex))));
+  document.querySelectorAll('[data-clear-local-asset-index]').forEach((button) => button.addEventListener('click', () => clearLocalAssetImages(Number(button.dataset.clearLocalAssetIndex))));
+  document.querySelectorAll('[data-show-local-asset-index]').forEach((button) => button.addEventListener('click', () => showLocalAssetImage(Number(button.dataset.showLocalAssetIndex), Number(button.dataset.showLocalFileIndex))));
+  document.querySelector('#generateNextVideo')?.addEventListener('click', () => {
+    const prompts = project.outputs.storyboard?.prompts || [];
+    const state = alignVideoGenerationItems(prompts);
+    const nextIndex = state.items.findIndex((item) => item.status !== 'success');
+    if (nextIndex >= 0) generateSeedanceVideos({ token: ++generationRun, indexes: [nextIndex], mode: 'confirm' });
+  });
+  document.querySelector('#generateAllVideos')?.addEventListener('click', () => generateSeedanceVideos({ token: ++generationRun, mode: 'batch' }));
   document.querySelector('#openVideoFolder')?.addEventListener('click', openVideoOutputFolder);
   document.querySelectorAll('[data-show-video-index]').forEach((button) => button.addEventListener('click', () => showGeneratedVideo(Number(button.dataset.showVideoIndex))));
-  document.querySelectorAll('[data-generate-video-index]').forEach((button) => button.addEventListener('click', () => generateSeedanceVideos({ token: ++generationRun, indexes: [Number(button.dataset.generateVideoIndex)] })));
+  document.querySelectorAll('[data-generate-video-index]').forEach((button) => button.addEventListener('click', () => generateSeedanceVideos({ token: ++generationRun, indexes: [Number(button.dataset.generateVideoIndex)], mode: 'confirm' })));
   document.querySelectorAll('.copy-shot').forEach((button) => button.addEventListener('click', () => {
     const prompt = project.outputs.storyboard?.prompts?.[Number(button.dataset.shotIndex)];
     const suffix = project.outputs.storyboard?.unifiedSuffix || '';
@@ -787,6 +794,7 @@ function deleteProject(projectId) {
 function openModelSettings() { document.querySelector('#settingsModal').hidden = false; document.querySelector('#deepseekKey').focus(); }
 function closeModelSettings() { document.querySelector('#settingsModal').hidden = true; }
 function openImageSettings() {
+  if (!IMAGE_MODEL_GENERATION_ENABLED) return showToast('第五步模型生图已暂停，请直接上传本地参考图');
   imageProviderDraft = imageProvider;
   const modal = document.querySelector('#imageSettingsModal');
   modal.hidden = false;
@@ -884,6 +892,7 @@ function setImageMessage(message, type = '') {
 }
 
 async function saveImageSettings() {
+  if (!IMAGE_MODEL_GENERATION_ENABLED) return setImageMessage('第五步模型生图已暂停，请直接上传本地参考图。', 'error');
   const provider = imageProviderDraft;
   setImageMessage('正在使用 Windows 安全保存…');
   try {
@@ -918,6 +927,7 @@ async function saveImageSettings() {
 }
 
 async function testImageConnection() {
+  if (!IMAGE_MODEL_GENERATION_ENABLED) return setImageMessage('第五步模型生图已暂停。', 'error');
   const provider = imageProviderDraft;
   const apiKey = document.querySelector(provider === 'openai' ? '#openAIImageKey' : '#seedreamKey').value.trim();
   setImageMessage(`正在验证${provider === 'openai' ? ' OpenAI' : '火山方舟'} API Key，不会生成图片或产生生图费用…`);
@@ -1044,8 +1054,8 @@ function renderAIWorkflow(data, usage, model) {
     analysis: { title: analysis.title || '故事结构分析', subtitle: `模型：${model || 'deepseek-v4-pro'} · ${usageText}`, time: 'AI 生成', body: analysisBody },
     episodes: { title: '分集大纲', subtitle: `${episodes.length} 集 · 人物与主线保持一致`, time: 'AI 生成', body: episodesBody },
     script: { title: script.title || '短剧剧本', subtitle: `${scenes.length} 场 · 可拍摄动作与人物对白`, time: 'AI 生成', body: scriptBody },
-    storyboard: { title: storyboard.title || '即梦二点零分镜提示词', subtitle: `${shots.length} 个镜头 · 时长由剧情动态分配`, time: 'AI 生成', prompts: shots.map((shot) => String(shot.prompt || '')), durations: shots.map((shot) => resolveSeedanceDuration(shot.duration, shot.prompt, SEEDANCE_DEFAULT_DURATION)), unifiedSuffix, body: storyboardBody },
-    assets: { title: 'AI 视觉素材', subtitle: `${promptItems.length} 张 · 人物三视图、场景多视角、群像与道具`, time: '逐张生成', promptItems, body: assetsBody },
+    storyboard: { title: storyboard.title || '即梦二点零分镜提示词', subtitle: `${shots.length} 个镜头 · 时长由剧情动态分配`, time: 'AI 生成', prompts: shots.map((shot) => String(shot.prompt || '')), durations: shots.map((shot) => resolveSeedanceDuration(shot.duration, shot.prompt, SEEDANCE_DEFAULT_DURATION)), shots, unifiedSuffix, body: storyboardBody },
+    assets: { title: '本地参考图素材', subtitle: `${promptItems.length} 项 · 请按人物、场景、群像和道具分别上传`, time: '本地上传', promptItems, body: assetsBody },
   };
 }
 
@@ -1062,13 +1072,12 @@ function buildPromptFromShot(shot) {
 }
 
 function initializeAssetGeneration(promptItems) {
-  const status = activeImageStatus();
   project.assetGeneration = {
     status: 'pending',
-    provider: imageProvider,
-    model: status.model,
-    size: status.size,
-    quality: imageProvider === 'openai' ? status.quality : '',
+    provider: 'local',
+    model: '',
+    size: '',
+    quality: '',
     outputDirectory: '',
     generatedCount: 0,
     totalCount: promptItems.length,
@@ -1077,6 +1086,7 @@ function initializeAssetGeneration(promptItems) {
       type: String(item.type || ''),
       fileName: String(item.fileName || ''),
       status: 'pending',
+      files: [],
       localPath: '',
       imageUrl: '',
       error: '',
@@ -1090,28 +1100,105 @@ function alignAssetGenerationItems(prompts) {
   const byFileName = new Map(current.map((item) => [String(item.fileName || ''), item]));
   state.items = prompts.map((prompt, index) => {
     const saved = byFileName.get(String(prompt.fileName || '')) || current[index] || {};
+    const files = Array.isArray(saved.files) ? saved.files.filter((file) => file?.localPath) : [];
+    if (!files.length && saved.localPath) files.push({ localPath: saved.localPath, imageUrl: saved.imageUrl || '', fileName: saved.fileName || '', sourceName: saved.fileName || '' });
     return {
       name: String(prompt.name || ''),
       type: String(prompt.type || ''),
       fileName: String(saved.fileName || prompt.fileName || ''),
-      status: saved.status || 'pending',
-      localPath: saved.localPath || '',
-      imageUrl: saved.imageUrl || '',
-      error: saved.error || '',
+      status: files.length ? 'success' : 'pending',
+      files,
+      localPath: files[0]?.localPath || '',
+      imageUrl: files[0]?.imageUrl || '',
+      error: '',
       generatedAt: saved.generatedAt || '',
     };
   });
-  const status = activeImageStatus();
-  state.provider = state.provider || 'seedream';
-  state.model = state.model || status.model;
-  state.size = state.size || status.size;
-  state.quality = state.quality || (state.provider === 'openai' ? status.quality : '');
+  state.provider = 'local';
+  state.model = '';
+  state.size = '';
+  state.quality = '';
   state.totalCount = prompts.length;
+  state.generatedCount = state.items.filter((item) => item.files.length).length;
+  state.status = state.generatedCount === prompts.length && prompts.length ? 'complete' : 'pending';
   project.assetGeneration = state;
   return state;
 }
 
+async function selectLocalAssetImages(index) {
+  const prompts = project.outputs.assets?.promptItems || [];
+  const prompt = prompts[index];
+  if (!prompt || !window.storyforgeAI?.selectLocalAssetImages) return showToast('当前素材项无法上传图片');
+  try {
+    const result = await window.storyforgeAI.selectLocalAssetImages({
+      projectId: project.id,
+      projectTitle: project.title,
+      index,
+      assetName: String(prompt.name || `素材${index + 1}`),
+      assetType: String(prompt.type || '参考图'),
+    });
+    if (result?.canceled || !result?.files?.length) return;
+    const state = alignAssetGenerationItems(prompts);
+    const existing = Array.isArray(state.items[index].files) ? state.items[index].files : [];
+    const merged = [...existing, ...result.files]
+      .filter((file, fileIndex, files) => file?.localPath && files.findIndex((candidate) => candidate.localPath === file.localPath) === fileIndex)
+      .slice(0, 9);
+    state.items[index] = {
+      ...state.items[index],
+      files: merged,
+      status: merged.length ? 'success' : 'pending',
+      localPath: merged[0]?.localPath || '',
+      imageUrl: merged[0]?.imageUrl || '',
+      error: '',
+      generatedAt: new Date().toISOString(),
+    };
+    state.outputDirectory = result.outputDirectory || state.outputDirectory;
+    state.generatedCount = state.items.filter((item) => item.files.length).length;
+    state.status = state.generatedCount === prompts.length ? 'complete' : 'pending';
+    project.completed = project.completed.filter((id) => id !== 'assets');
+    saveProject(); render();
+    showToast(`${prompt.name || '当前素材'}已上传 ${result.files.length} 张参考图`);
+  } catch (error) {
+    showToast(cleanRemoteError(error, '上传参考图失败'));
+  }
+}
+
+function clearLocalAssetImages(index) {
+  const prompts = project.outputs.assets?.promptItems || [];
+  const state = alignAssetGenerationItems(prompts);
+  if (!state.items[index]) return;
+  state.items[index] = { ...state.items[index], files: [], status: 'pending', localPath: '', imageUrl: '', error: '' };
+  state.generatedCount = state.items.filter((item) => item.files.length).length;
+  state.status = 'pending';
+  project.completed = project.completed.filter((id) => id !== 'assets');
+  saveProject(); render();
+  showToast('已清空此项的参考图关联，磁盘中的原文件仍然保留');
+}
+
+async function showLocalAssetImage(itemIndex, fileIndex) {
+  const filePath = project.assetGeneration?.items?.[itemIndex]?.files?.[fileIndex]?.localPath;
+  try { await window.storyforgeAI.showLocalAssetImage(filePath); }
+  catch (error) { showToast(cleanRemoteError(error, '无法找到这张参考图')); }
+}
+
+function confirmLocalAssets() {
+  const prompts = project.outputs.assets?.promptItems || [];
+  const state = alignAssetGenerationItems(prompts);
+  const missing = state.items.filter((item) => !item.files.length);
+  if (!prompts.length) return showToast('第五步没有可确认的素材清单');
+  if (missing.length) return showToast(`还有 ${missing.length} 项没有上传参考图`);
+  state.status = 'complete';
+  state.generatedCount = state.items.length;
+  if (!project.completed.includes('assets')) project.completed.push('assets');
+  project.activeStep = 'video';
+  if (!project.outputs.video) project.outputs.video = makeOutput('video');
+  alignVideoGenerationItems(project.outputs.storyboard?.prompts || []);
+  saveProject(); render();
+  showToast('本地参考图已确认，可以逐个或批量生成视频');
+}
+
 async function generateImageAssets({ token, indexes = null, autoAdvance = true }) {
+  if (!IMAGE_MODEL_GENERATION_ENABLED) return showToast('第五步模型生图已暂停，请为每项上传本地参考图');
   const prompts = project.outputs.assets?.promptItems || [];
   if (!prompts.length) return showToast('第五步还没有可生成的参考图提示词');
   const provider = imageProvider;
@@ -1214,14 +1301,8 @@ async function generateImageAssets({ token, indexes = null, autoAdvance = true }
 }
 
 async function openAssetOutputFolder() {
-  try { await window.storyforgeAI.openSeedreamOutput(project.assetGeneration?.outputDirectory); }
+  try { await window.storyforgeAI.openLocalAssetOutput(project.assetGeneration?.outputDirectory); }
   catch (error) { showToast(cleanRemoteError(error, '无法打开图片文件夹')); }
-}
-
-async function showGeneratedAsset(index) {
-  const filePath = project.assetGeneration?.items?.[index]?.localPath;
-  try { await window.storyforgeAI.showSeedreamImage(filePath); }
-  catch (error) { showToast(cleanRemoteError(error, '无法找到这张图片')); }
 }
 
 async function startGeneration(retry = false) {
@@ -1258,15 +1339,9 @@ async function startGeneration(retry = false) {
     project.outputs.assets = outputs.assets;
     initializeAssetGeneration(outputs.assets.promptItems || []);
     project.aiGeneration = { model: response.model || 'deepseek-v4-pro', usage: response.usage || null, generatedAt: new Date().toISOString() };
+    project.running = false;
     saveProject(); render();
-    if (!activeImageStatus().configured) {
-      project.running = false;
-      saveProject(); render();
-      openImageSettings();
-      setImageMessage(`DeepSeek 已完成前四步。请配置${imageProvider === 'openai' ? ' OpenAI' : '火山方舟'} API Key，保存后自动生成第五步参考图。`, 'error');
-      return;
-    }
-    await generateImageAssets({ token, autoAdvance: true });
+    showToast('DeepSeek 已完成前四步，请在第五步为每项上传本地参考图');
   } catch (error) {
     if (token !== generationRun) return;
     project.running = false;
@@ -1329,22 +1404,57 @@ function alignVideoGenerationItems(prompts) {
   return state;
 }
 
-function prepareSeedancePrompt(prompt) {
+function normalizedAssetIdentity(value) {
+  return String(value || '')
+    .replace(/人物|角色|场景|群像|道具|设定图|参考图|三视图|多视角|图片|外观|背景|用途/g, '')
+    .replace(/[\s·｜|：:，,。；;、（）()《》【】\[\]_-]/g, '')
+    .toLowerCase();
+}
+
+function findAssetForUpload(upload, assets) {
+  const uploadText = `${upload?.asset || ''}${upload?.purpose || ''}`;
+  const normalizedUpload = normalizedAssetIdentity(uploadText);
+  const direct = assets.find((item) => {
+    const name = String(item?.name || '');
+    const normalizedName = normalizedAssetIdentity(name);
+    return name && (uploadText.includes(name) || (normalizedName && normalizedUpload.includes(normalizedName)));
+  });
+  if (direct) return direct;
+  if (/场景|环境|宴会厅|入口|舞台|室内|室外/.test(uploadText)) return assets.find((item) => /场景/.test(String(item?.type || '')));
+  if (/道具|戒指|手机|文件|照片|证据|物件/.test(uploadText)) return assets.find((item) => /道具/.test(String(item?.type || '')));
+  if (/群像|宾客|人群|背景人物/.test(uploadText)) return assets.find((item) => /群像/.test(String(item?.type || '')));
+  return null;
+}
+
+function prepareSeedancePrompt(prompt, shotIndex) {
   const assets = project.assetGeneration?.items || [];
+  const shot = project.outputs.storyboard?.shots?.[shotIndex] || {};
+  const uploads = Array.isArray(shot.uploads) ? shot.uploads : [];
   const imagePaths = [];
   const numberMap = new Map();
   const references = [...String(prompt || '').matchAll(/@Image(\d+)/gi)]
     .map((match) => Number(match[1]))
     .filter((value, index, list) => value > 0 && list.indexOf(value) === index);
   for (const number of references) {
-    const asset = assets[number - 1];
-    if (asset?.status === 'success' && asset.localPath && imagePaths.length < 9) {
-      imagePaths.push(asset.localPath);
-      numberMap.set(number, imagePaths.length);
+    const upload = uploads.find((item) => Number(String(item?.ref || '').match(/@Image(\d+)/i)?.[1]) === number);
+    const asset = findAssetForUpload(upload, assets) || assets[number - 1];
+    const files = Array.isArray(asset?.files) && asset.files.length
+      ? asset.files
+      : asset?.localPath ? [{ localPath: asset.localPath }] : [];
+    const mapped = [];
+    for (const file of files) {
+      if (!file?.localPath || imagePaths.length >= 9) break;
+      let existingIndex = imagePaths.indexOf(file.localPath);
+      if (existingIndex < 0) {
+        imagePaths.push(file.localPath);
+        existingIndex = imagePaths.length - 1;
+      }
+      mapped.push(existingIndex + 1);
     }
+    if (mapped.length) numberMap.set(number, mapped);
   }
   let text = String(prompt || '')
-    .replace(/@Image(\d+)/gi, (_match, value) => numberMap.has(Number(value)) ? `图片${numberMap.get(Number(value))}` : '')
+    .replace(/@Image(\d+)/gi, (_match, value) => numberMap.has(Number(value)) ? numberMap.get(Number(value)).map((index) => `图片${index}`).join('、') : '')
     .replace(/@(Video|Audio)\d+/gi, '')
     .replace(/[，、]\s*[，、]/g, '，')
     .trim();
@@ -1376,7 +1486,7 @@ async function pollSeedanceTask(taskId, token, state, index) {
   throw new Error('Seedance 视频任务等待超过 30 分钟，请稍后重试或到火山方舟控制台查看。');
 }
 
-async function generateSeedanceVideos({ token, indexes = null, force = false }) {
+async function generateSeedanceVideos({ token, indexes = null, force = false, mode = null }) {
   const prompts = project.outputs.storyboard?.prompts || [];
   if (!prompts.length) return showToast('第四步还没有可生成的视频分镜');
   if (!window.storyforgeAI || !seedanceStatus.configured) {
@@ -1393,7 +1503,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false }) 
   state.ratio = seedanceStatus.ratio;
   state.resolution = seedanceStatus.resolution;
   state.duration = seedanceStatus.duration;
-  state.generationMode = normalizeSeedanceGenerationMode(seedanceStatus.generationMode);
+  state.generationMode = normalizeSeedanceGenerationMode(mode || seedanceStatus.generationMode);
   state.generateAudio = seedanceStatus.generateAudio;
   state.lastError = '';
   const selection = selectSeedanceGenerationIndexes(state.items, { indexes, force, mode: state.generationMode });
@@ -1410,7 +1520,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false }) 
 
   for (const index of requested) {
     if (token !== generationRun) return;
-    const prepared = prepareSeedancePrompt(prompts[index]);
+    const prepared = prepareSeedancePrompt(prompts[index], index);
     const duration = storyboardShotDuration(index, prompts[index], state.duration);
     state.items[index] = { ...state.items[index], duration, status: 'creating', taskId: '', error: '' };
     saveProject(); render();
@@ -1472,7 +1582,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false }) 
 }
 
 async function generateVideoStage(token, force = false) {
-  return generateSeedanceVideos({ token, force });
+  return generateSeedanceVideos({ token, force, mode: 'batch' });
 }
 
 async function openVideoOutputFolder() {
