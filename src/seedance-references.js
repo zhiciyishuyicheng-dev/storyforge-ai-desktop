@@ -49,6 +49,12 @@ export function removeAndRenumberImageReference(prompt, removedNumber, replaceme
 }
 
 export function normalizeImageReferenceSequence(prompt, uploads = [], bindings = {}) {
+  // Named references are identities, not positions. Old numbering repair must not
+  // erase them or move a saved image to a different character.
+  if ((Array.isArray(uploads) ? uploads : []).some((upload) => text(upload?.ref) && !imageReferenceNumber(upload.ref))
+    || /@(?!Image\d+|Video\d+|Audio\d+)/i.test(text(prompt))) {
+    return { prompt: text(prompt), uploads: Array.isArray(uploads) ? uploads : [], bindings: bindings || {}, changed: false };
+  }
   const normalizedUploads = [];
   const oldToNew = new Map();
   for (const upload of Array.isArray(uploads) ? uploads : []) {
@@ -105,10 +111,6 @@ export function listUploadedReferenceFiles(assetItems = []) {
   });
 }
 
-function sameNumbers(left, right) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
 function bindingMatchesFile(binding, file) {
   if (!binding || !file) return false;
   const bindingAssetId = text(binding.trustedAssetId).replace(/^asset:\/\//i, '');
@@ -120,7 +122,9 @@ function legacyReferenceDefinition(prompt, number, assetItems) {
   const marker = new RegExp(`@Image${number}(?!\\d)`, 'i');
   const markerMatch = marker.exec(text(prompt));
   const tail = markerMatch ? text(prompt).slice(markerMatch.index, markerMatch.index + markerMatch[0].length + 100) : '';
-  const context = tail.split(/[；;。\n]/).filter(Boolean)[0] || tail;
+  const nextReference = tail.indexOf('@', 1);
+  const ownTail = nextReference >= 0 ? tail.slice(0, nextReference) : tail;
+  const context = ownTail.split(/[；;。\n]/).filter(Boolean)[0] || ownTail;
   const assetNames = assetItems.map((item) => text(item?.name)).filter((name) => name && name !== '@' && name.length > 1).sort((left, right) => right.length - left.length);
   const assetName = assetNames.find((name) => context.includes(name)) || '';
   const purpose = context
@@ -130,60 +134,156 @@ function legacyReferenceDefinition(prompt, number, assetItems) {
   return { ref: `@Image${number}`, number, assetName, purpose, uploadIndex: number - 1, legacy: true };
 }
 
+export function namedReferenceKey(assetName) {
+  return `asset:${text(assetName)}`;
+}
+
+// Match known names before looking for punctuation: names may themselves contain
+// spaces or brackets, and a longer scene/character name must win over its prefix.
+export function extractAssetReferences(prompt, assetItems = []) {
+  const source = text(prompt);
+  const names = [...new Set(assetItems.map((asset) => text(asset?.name)).filter(Boolean))]
+    .sort((left, right) => right.length - left.length);
+  const references = [];
+  for (let start = source.indexOf('@'); start >= 0; start = source.indexOf('@', start + 1)) {
+    const tail = source.slice(start + 1);
+    const assetName = names.find((name) => tail.startsWith(name)
+      && !/^[（(]/u.test(tail.slice(name.length))
+      && (!/[\p{L}\p{N}_]$/u.test(name) || !/^[A-Za-z0-9_]/.test(tail.slice(name.length))));
+    if (assetName) {
+      references.push({ ref: `@${assetName}`, assetName, kind: 'named', start, end: start + assetName.length + 1 });
+      start += assetName.length;
+      continue;
+    }
+    const numbered = tail.match(/^Image(\d+)(?![A-Za-z0-9_])/i);
+    if (numbered) {
+      references.push({ ref: `@Image${Number(numbered[1])}`, sourceNumber: Number(numbered[1]), kind: 'legacy', start, end: start + numbered[0].length + 1 });
+      start += numbered[0].length;
+      continue;
+    }
+    const ignored = tail.match(/^(?:Video|Audio)\d+/i);
+    if (ignored) {
+      start += ignored[0].length;
+      continue;
+    }
+    const unknown = tail.match(/^[^\s@，,。；;：:！!？?、\n\r“”"「」《》]+/u)?.[0] || '';
+    if (unknown) references.push({ ref: `@${unknown}`, assetName: unknown, kind: 'unknown', start, end: start + unknown.length + 1 });
+  }
+  return references;
+}
+
+function replaceReferenceOccurrences(prompt, references, replacement) {
+  let result = text(prompt);
+  for (const reference of [...references].reverse()) {
+    const value = replacement(reference);
+    if (value !== undefined) result = result.slice(0, reference.start) + value + result.slice(reference.end);
+  }
+  return result;
+}
+
 export function resolveStrictReferencePlan({ prompt, shot, assetItems = [], savedBindings = {} }) {
   const errors = [];
   const uploads = Array.isArray(shot?.uploads) ? shot.uploads : [];
-  const structuredDefinitions = uploads.map((upload, uploadIndex) => ({
-    ref: text(upload?.ref),
-    number: imageReferenceNumber(upload?.ref),
-    assetName: text(upload?.asset),
-    purpose: text(upload?.purpose),
-    uploadIndex,
-    addedInVideoStep: Boolean(upload?.addedInVideoStep),
-    restoredFromLegacy: Boolean(upload?.restoredFromLegacy),
-  }));
-  const promptNumbers = extractImageReferenceNumbers(prompt);
-  const legacyMode = structuredDefinitions.length === 0 && promptNumbers.length > 0;
-  const definitions = legacyMode
-    ? promptNumbers.map((number) => legacyReferenceDefinition(prompt, number, assetItems))
-    : structuredDefinitions;
-  const invalidUpload = definitions.find((item) => !item.number || (!item.legacy && (!item.assetName || !item.purpose)));
-  if (invalidUpload) errors.push(`上传计划第 ${invalidUpload.uploadIndex + 1} 项缺少有效的 @Image 编号、素材名称或用途。`);
-  const validDefinitions = definitions.filter((item) => item.number).sort((left, right) => left.number - right.number);
-  const definitionNumbers = validDefinitions.map((item) => item.number);
-  if (new Set(definitionNumbers).size !== definitionNumbers.length) errors.push('上传计划存在重复的 @Image 编号。');
-  if (validDefinitions.length > 9) errors.push('单个镜头最多只能绑定 9 张参考图。');
-  const expectedNumbers = Array.from({ length: validDefinitions.length }, (_value, index) => index + 1);
-  if (!sameNumbers(definitionNumbers, expectedNumbers)) errors.push('上传计划必须从 @Image1 开始连续编号，不能跳号。');
-
-  if (!sameNumbers(promptNumbers, definitionNumbers)) {
-    const expected = definitionNumbers.map((number) => `@Image${number}`).join('、') || '无';
-    const actual = promptNumbers.map((number) => `@Image${number}`).join('、') || '无';
-    errors.push(`提示词引用与上传计划不一致：应为 ${expected}，当前为 ${actual}。`);
-  }
-
   const availableFiles = listUploadedReferenceFiles(assetItems);
-  const duplicateAssetNames = [...new Set(assetItems.map((item) => text(item?.name)).filter(Boolean)
-    .filter((name, index, values) => values.indexOf(name) !== index))];
-  if (duplicateAssetNames.length) errors.push(`第五步存在同名素材：${duplicateAssetNames.join('、')}。请保留唯一名称。`);
-
-  const bindings = validDefinitions.map((definition) => {
-    const exactCandidates = availableFiles.filter((file) => file.assetName === definition.assetName);
-    const saved = savedBindings?.[String(definition.number)] || savedBindings?.[definition.number];
-    const selected = availableFiles.find((file) => bindingMatchesFile(saved, file)) || exactCandidates[0] || null;
-    if (definition.legacy) {
-      if (!selected) errors.push(`${definition.ref} 尚未绑定第五步的具体参考图。`);
-    } else if (!assetItems.some((asset) => text(asset?.name) === definition.assetName)) {
-      errors.push(`${definition.ref} 指定的素材“${definition.assetName}”在第五步不存在。`);
-    } else if (!exactCandidates.length) {
-      errors.push(`${definition.ref} 指定的素材“${definition.assetName}”尚未上传参考图。`);
-    } else if (selected && selected.assetName !== definition.assetName) {
-      errors.push(`${definition.ref} 必须绑定“${definition.assetName}”，当前选择的是“${selected.assetName}”。`);
-    }
-    return { ...definition, candidates: availableFiles, exactCandidates, selected };
+  const names = assetItems.map((item) => text(item?.name)).filter(Boolean);
+  const duplicateAssetNames = [...new Set(names.filter((name, index) => names.indexOf(name) !== index))];
+  if (duplicateAssetNames.length) errors.push(`视觉素材存在同名素材：${duplicateAssetNames.join('、')}。请保留唯一名称。`);
+  const references = extractAssetReferences(prompt, assetItems);
+  const uniqueReferences = references.filter((reference, index) => references.findIndex((item) => item.ref === reference.ref) === index);
+  const unknown = uniqueReferences.filter((reference) => reference.kind === 'unknown');
+  unknown.forEach((reference) => errors.push(`分镜引用 ${reference.ref} 在第三步中没有同名素材，请使用准确的素材名称。`));
+  const usedReferences = uniqueReferences.filter((reference) => reference.kind !== 'unknown');
+  if (usedReferences.length > 9) errors.push('单个镜头最多只能绑定 9 张参考图。');
+  const definitions = usedReferences.map((reference, index) => {
+    const uploadIndex = reference.kind === 'named'
+      ? uploads.findIndex((upload) => text(upload?.asset) === reference.assetName || text(upload?.ref) === reference.ref)
+      : uploads.findIndex((upload) => imageReferenceNumber(upload?.ref) === reference.sourceNumber);
+    const upload = uploads[uploadIndex];
+    const restored = reference.kind === 'legacy' && !upload
+      ? legacyReferenceDefinition(prompt, reference.sourceNumber, assetItems)
+      : null;
+    const assetName = reference.kind === 'named' ? reference.assetName : text(upload?.asset) || restored?.assetName || '';
+    const number = index + 1;
+    const sourceNumber = reference.sourceNumber || imageReferenceNumber(upload?.ref) || 0;
+    const purpose = text(upload?.purpose) || restored?.purpose || `${assetName}的外观与视觉特征参考`;
+    const oldSlot = savedBindings?.[`image:${sourceNumber}`] || savedBindings?.[reference.ref] || savedBindings?.[String(sourceNumber)];
+    const countName = assetName || availableFiles.find((file) => bindingMatchesFile(oldSlot, file))?.assetName || '';
+    return { reference, uploadIndex, upload, assetName, number, sourceNumber, purpose, countName };
   });
+  const bindings = definitions.map(({ reference, uploadIndex, upload, assetName, number, sourceNumber, purpose, countName }) => {
+    const legacySeparate = reference.kind === 'legacy' && (Boolean(upload?.legacySeparate)
+      || Boolean(countName && definitions.filter((definition) => definition.countName === countName).length > 1));
+    const key = assetName && !legacySeparate ? namedReferenceKey(assetName) : `image:${sourceNumber}`;
+    const exactCandidates = availableFiles.filter((file) => file.assetName === assetName);
+    const candidates = assetName ? exactCandidates : availableFiles;
+    const numberedSaved = savedBindings?.[String(sourceNumber || number)];
+    const numberedSavedFile = availableFiles.find((file) => bindingMatchesFile(numberedSaved, file));
+    // A newly inserted named reference must not inherit a former character's
+    // numeric slot. Only an explicit old upload mapping may claim that slot.
+    const compatibleNumberedSaved = reference.kind === 'legacy' || sourceNumber
+      || (numberedSaved && (text(numberedSaved.assetName) === assetName || numberedSavedFile?.assetName === assetName))
+      ? numberedSaved : null;
+    const saved = savedBindings?.[key] || savedBindings?.[reference.ref] || compatibleNumberedSaved;
+    const savedFile = availableFiles.find((file) => bindingMatchesFile(saved, file));
+    let selected = savedFile || exactCandidates[0] || null;
+    if (assetName && saved && ((text(saved.assetName) && text(saved.assetName) !== assetName)
+      || (savedFile && savedFile.assetName !== assetName))) {
+      errors.push(`${reference.ref} 必须绑定同名素材“${assetName}”，已保存的选图属于其他素材，请重新选择。`);
+      selected = null;
+    }
+    if (assetName && !names.includes(assetName)) {
+      errors.push(`${reference.ref} 指定的素材“${assetName}”在视觉素材中不存在。`);
+    } else if (assetName && !exactCandidates.length) {
+      errors.push(`${reference.ref} 指定的素材“${assetName}”尚未上传参考图。`);
+    } else if (!assetName && !selected) {
+      errors.push(`${reference.ref} 尚未绑定视觉素材中的具体参考图。`);
+    }
+    return {
+      ref: reference.ref, number, key, sourceNumber, assetName, purpose, uploadIndex,
+      legacy: reference.kind === 'legacy' && !upload,
+      named: reference.kind === 'named', legacySeparate,
+      addedInVideoStep: Boolean(upload?.addedInVideoStep),
+      restoredFromLegacy: Boolean(upload?.restoredFromLegacy),
+      candidates, exactCandidates, selected, savedBinding: saved || null,
+    };
+  });
+  return {
+    valid: errors.length === 0 && bindings.every((binding) => binding.selected),
+    errors, bindings, availableFiles, references,
+    legacyMode: bindings.some((binding) => binding.legacy),
+    namedMode: bindings.some((binding) => binding.named),
+  };
+}
 
-  return { valid: errors.length === 0 && bindings.every((binding) => binding.selected), errors, bindings, availableFiles, legacyMode };
+// Pure migration: callers may persist these fields together. Stable name keys
+// preserve a user's chosen variant even when reference order changes later.
+export function migrateNamedReferencePlan({ prompt, shot, assetItems = [], savedBindings = {} }) {
+  const plan = resolveStrictReferencePlan({ prompt, shot, assetItems, savedBindings });
+  const byRef = new Map(plan.bindings.map((binding) => [binding.ref, binding]));
+  const migratedPrompt = replaceReferenceOccurrences(prompt, plan.references, (reference) => {
+    const binding = byRef.get(reference.ref);
+    const assetName = binding?.assetName || binding?.selected?.assetName;
+    return assetName && !binding.legacySeparate ? `@${assetName}` : undefined;
+  });
+  const uploads = plan.bindings.map((binding) => ({
+    ...(shot?.uploads?.[binding.uploadIndex] || {}),
+    ref: !binding.legacySeparate && (binding.assetName || binding.selected?.assetName) ? `@${binding.assetName || binding.selected.assetName}` : binding.ref,
+    asset: binding.assetName || binding.selected?.assetName || '',
+    purpose: binding.purpose,
+    ...(binding.legacySeparate ? { legacySeparate: true } : {}),
+    ...(binding.legacy ? { restoredFromLegacy: true } : {}),
+  }));
+  const bindings = { ...savedBindings };
+  plan.bindings.forEach((binding) => {
+    const old = binding.savedBinding;
+    const resolvedName = binding.assetName || binding.selected?.assetName;
+    if (old) bindings[resolvedName && !binding.legacySeparate ? namedReferenceKey(resolvedName) : binding.key] = { ...old };
+  });
+  return {
+    prompt: migratedPrompt, uploads, bindings, plan,
+    changed: migratedPrompt !== text(prompt) || JSON.stringify(uploads) !== JSON.stringify(shot?.uploads || [])
+      || JSON.stringify(bindings) !== JSON.stringify(savedBindings),
+  };
 }
 
 export function buildSeedanceReferenceRequest({ prompt, shot, assetItems = [], savedBindings = {}, unifiedSuffix = '' }) {
@@ -194,8 +294,11 @@ export function buildSeedanceReferenceRequest({ prompt, shot, assetItems = [], s
     const assetName = binding.selected.assetName || binding.assetName;
     return `图片${binding.number}：${type}“${assetName}”，唯一用途：${binding.purpose}。`;
   });
-  const promptText = text(prompt)
-    .replace(/@Image(\d+)/gi, (_match, number) => `图片${Number(number)}`)
+  const byRef = new Map(plan.bindings.map((binding) => [binding.ref, binding]));
+  const promptText = replaceReferenceOccurrences(prompt, plan.references, (reference) => {
+    const binding = byRef.get(reference.ref);
+    return binding ? `图片${binding.number}` : undefined;
+  })
     .replace(/@(Video|Audio)\d+/gi, '')
     .replace(/[，、]\s*[，、]/g, '，')
     .trim();

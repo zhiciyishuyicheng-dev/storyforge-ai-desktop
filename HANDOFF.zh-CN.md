@@ -1,54 +1,154 @@
-# StoryForge 0.6.0 源码交接说明
+# StoryForge 1.0 源码交接说明
 
-## 项目状态
+## 当前交付
 
-- Windows 桌面端技术栈：Electron、Vite、原生 JavaScript 和 CSS。
-- 视频生成前五个阶段固定调用 `deepseek-v4-pro`：故事分析、分集大纲、短剧剧本、分镜提示词、视觉素材描述。
-- 分镜生成规范位于 `electron/deepseek-prompt.cjs`，参考资料位于 `docs/SKILL.zh-CN.md`。
-- 流程自动运行到“视频生成”之前停止；真实图片、配音和视频服务尚未接入。
-- DeepSeek API Key 由用户在软件中填写，并通过 Electron `safeStorage` 在 Windows 本机加密保存，不包含在源码包内。
+正式版本标识为 **1.0**，发布日期记录为 **2026-10-20**，GitHub 发行标签为 `v1.0`。Windows x64 安装包为 `release-v1.0/StoryForge-Setup-1.0-x64.exe`，发布入口见 [GitHub Releases v1.0](https://github.com/zhiciyishuyicheng-dev/storyforge-ai-desktop/releases/tag/v1.0)。安装版包含桌面运行环境，终端用户无需另装 Node.js。
 
-## 新电脑准备
+技术栈为 Electron、Vite、原生 JavaScript 与 CSS。当前流程只有故事分析、分镜脚本、视觉素材、视频生成四步；DeepSeek V4.1 Flash（`deepseek-flash`）直接根据原始输入生成分析、分镜及素材提示词，第三步通过本机官方 Codex 的 ChatGPT 登录使用 GPT Image 2（`gpt-image-2`）或上传本地图片，第四步接入火山方舟 Seedance 2.0 / 2.0 Fast。
 
-1. 安装 Node.js 20 或更高版本，建议使用当前长期支持版。
-2. 解压本源码包，进入项目根目录。
-3. 执行 `npm install` 恢复依赖。
-4. 执行 `npm run dev` 启动浏览器界面开发模式。
-5. 执行 `npm run desktop` 构建并运行 Electron 桌面版。
-6. 执行 `npm run desktop:pack` 生成 Windows 安装程序。
+默认按步骤操作，也可打开项目级“一键跑完全流程”从第一步自动补齐参考图并批量保存全部镜头视频。第三步图片齐备即标记完成，阶段重新生成不受全流程开关影响。生成中可浏览、复制同项目的其他模块，当前查看页面与真实任务阶段相互独立。
+
+本次代码 **250 项离线测试通过**，生产构建及源码、既有打包资源的隔离桌面模拟覆盖主要链路。模型服务在这些检查中使用替身，既有记录包含一次真实订阅单图生成和 PNG 落盘；本次未验证真实模型的完整小说到批量视频流程、实际成片质量与耗时，也未执行安装程序验收。发布或打包本身不代表这些验收已经完成。
+
+## 开发、构建与运行
+
+锁定依赖中的 Electron 需要 Node.js 22.12+，pdfjs-dist 需要 22.13+；开发环境使用 **Node.js 22.13+（或 24+）** 和 npm，以 `package-lock.json` 为准。
+
+```bash
+npm ci
+npm run dev          # 仅网页界面开发
+npm run build        # 生产前端构建
+npm run desktop      # 构建并启动 Electron
+npm run desktop:pack # Windows x64 安装包
+npm test             # 离线测试
+```
+
+`scripts/desktop-pack.cjs` 为本项目字面版本 1.0 提供仅在内存中的构建校验适配；源文件、包内版本及发布名保持 1.0，不修改依赖文件。
+
+构建输出目录统一为 `release-v1.0`，安装包名称为 `StoryForge-Setup-1.0-x64.exe`。保留锁文件和 `electron/skills` 原始资源。`node_modules`、`dist` 与 `release-*` 可恢复或重建，安装程序通过 GitHub Release 附件分发。
+
+纯网页模式用于界面预览和本地文字项目管理。模型调用、原生文件解析、Codex 连接、Windows 密钥加密和媒体保存依赖 Electron 通信桥；Vercel / Netlify 静态部署不提供完整生成链路。项目当前没有云端账号、后端数据库或跨电脑自动同步。
 
 ## 关键文件
 
-- `src/main.js`：界面、项目状态、生成流程和结果渲染。
-- `src/style.css`：完整界面样式和字体尺寸。
-- `electron/main.cjs`：桌面主进程、DeepSeek 接口调用、密钥加密和结果校验。
-- `electron/preload.cjs`：主进程与界面之间的安全通信桥。
-- `electron/deepseek-prompt.cjs`：DeepSeek 系统提示词和结构化返回要求。
-- `package.json`：开发、构建和 Windows 安装包配置。
-- `package-lock.json`：精确依赖版本，交接时必须保留。
-- `docs/SKILL.zh-CN.md`：即梦二点零提示词规范原文。
+| 文件 | 作用 |
+| --- | --- |
+| `src/main.js` | 项目状态、四步页面、生成编排、后台浏览与阶段重试 |
+| `src/style.css` | 结果优先布局、全宽素材/视频、Skill 栏与固定计时面板 |
+| `src/workflow-progress.js` | 遥测白名单、实时显示、恢复与终态冻结 |
+| `src/seedance-references.js` | 具名引用、旧数据迁移、唯一图片选取及平台请求映射 |
+| `electron/main.cjs` / `preload.cjs` | 主进程、参数校验、本机凭据与前端通信 |
+| `electron/deepseek-client.cjs` | 流式接收、首段等待、字符计数、超时与断流识别 |
+| `electron/deepseek-prompt.cjs` | 默认或用户 Skill 的生成、独立审核、修正提示词与返回结构 |
+| `electron/deepseek-workflow.cjs` | 候选、独立审核、最多一次回炉、警告继续及阻塞交付 |
+| `electron/storyboard-policy.cjs` | 结构、时间线、原声、素材身份及审计结果的本地校验 |
+| `electron/storyboard-skill.cjs` | 完整内置规范读取、哈希和 60 项审计规则提取 |
+| `electron/skills/storyboard-v2.1.txt` | 用户指定的完整 871 行内置分镜规范 |
+| `electron/stage-skills.cjs` / `skill-documents.cjs` | 阶段文档归一化、哈希、上传解析和指令构建 |
+| `electron/codex-image.cjs` | 官方 Codex app-server 订阅生图及具名文件保存 |
+| `electron/seedance.cjs` | 视频任务提交、查询及本地下载 |
+| `electron/workflow-timing.cjs` | 准备、生成、思考接收窗口、独立审计的耗时快照 |
 
-## DeepSeek 配置与测试
+`docs/SKILL.zh-CN.md` 为旧即梦资料，当前默认分镜规范以完整 v2.1 文件为准，不能用该历史摘要替代。
 
-- 固定模型：`deepseek-v4-pro`。
-- 接口地址：`https://api.deepseek.com/chat/completions`。
-- 首次打开桌面应用后，点击 DeepSeek 设置，填写 API Key 并测试连接。
-- 没有 API Key 或接口失败时，应用会显示真实错误，不会退回本地模板。
-- API Key 和 Electron 用户数据均未包含在交接压缩包中；新电脑需要重新填写。
+## 配置与本地数据
 
-## 继续优化时的注意事项
+- DeepSeek 接口为 `https://api.deepseek.com/chat/completions`，固定模型 ID 为 `deepseek-flash`。应用明确启用 high 思考模式。
+- DeepSeek 与 Seedance API Key 由用户在软件中填写，使用 Electron `safeStorage` 在 Windows 本机加密保存；源码、项目 JSON 和发行附件不包含这些凭据。
+- GPT 订阅生图通过本机官方 Codex `app-server` 使用 ChatGPT 登录账号及其可用限额，前端不收取 OpenAI API Key。新电脑需安装 Codex、完成登录，并在软件中重新检测；自动检测失败时可选择 `codex.exe`。
+- 现有 Seedream / OpenAI 付费 API 生图代码保留，但功能开关关闭。第三步支持订阅生图和本地图片上传。
+- 项目自动保存在当前电脑本地，JSON 包保留文本、Skill 与文件关联信息。图片和视频保存在“文档/StoryForge/项目标题/项目编号”下；跨电脑迁移需另行复制媒体，不能把 JSON 导出描述成媒体打包或云同步。
+- `node_modules`、构建缓存、浏览器/Electron 用户数据、本机凭据和用户媒体不作为源码交付内容。
 
-- 必须保留剧本中的真实人物姓名，不能把标题、类型、规格等元数据识别成人物。
-- 分镜提示词除 `@Image1`、`@Video1`、`@Audio1` 等平台引用标记外，应使用中文。
-- 每个镜头单独列出上传素材、分段时间、画面动作、人物对白、镜头运动和声音。
-- 不要将 DeepSeek API Key 写进前端源码、环境示例或安装包。
-- 如果要在两台不处于同一局域网的电脑间同步项目，需要增加登录、后端接口和云端数据库；当前项目数据仍以每台电脑本地保存为主。
+## Skill 与分镜审计
 
-## 未包含的内容
+项目字段 `generationSkills.storyboard` 和 `generationSkills.assets` 分别保存文档；未上传时为 null。文档含名称、正文、格式、原文件字节数、导入时间及正文 SHA-256，不记录原始文件路径。每次开始生成时锁定快照，后续替换只影响下一次请求。
 
-为了减小体积并避免泄露本机数据，压缩包不包含：
+原生对话框选定文件后，独立 Worker 解析 TXT / MD、DOCX 和文字型 PDF。单文件上限 10 MiB、正文上限 200,000 字符，超限不截断；空文件、纯扫描、加密或损坏文档明确报错。mammoth 和 pdfjs-dist 为生产依赖，需要随桌面包携带。
 
-- `node_modules`，可通过 `npm install` 恢复。
-- `dist` 和 `release-*`，可通过构建命令重新生成。
-- DeepSeek API Key、本机缓存、浏览器存储和 Electron 用户数据。
-- Git 历史；当前仓库尚无提交记录，源码文件本身已全部打包。
+分镜 Skill 替换内置创作默认值，生成、独立审核及回炉使用同一份文档；资产 Skill 进入素材提示词和实际 Codex `turn/start` 请求。资产文档在已有分镜后上传，也可直接影响下一次单张或批量生图。历史结果以当次名称/哈希标识依据，用户 Skill 显示 `auditBasis: '用户 Skill'`，不能冒称通过内置 60 项。
+
+完整默认 Skill v2.1 共 871 行，SHA-256 为 `5c353bba5390949a3477db711141f84752f529b9bb0307a629804fe896af2f2a`。原始文件字节保持不变，具名引用等应用要求作为覆盖指令追加；不能修改原文件来伪造一致性。
+
+默认生成块允许 1–15 秒、1–5 个实际镜头，按原文声画节拍自然分块，连续运镜不自动算硬切。默认锁定原声的字词、数字、标点和顺序，非配音叙述可视觉化，第三人称心理不能无授权改成心声。`storyboard.shots` 表示生成块，`segments` 表示实际镜头，二者不能混为固定五镜模板。
+
+流程为候选生成 → 本地校验 → 独立审核 → 失败最多回炉一次 → 重新审核。内置规范逐块检查 60 项及全批连续性；用户 Skill 按上传文档实际条款审核。回炉后仍有内容审计失败，但基础结构可用且无真实剧情阻塞时，保留失败项并按用户设置继续视觉素材。
+
+- 忽略后明确使用 `auditSummary.finalStatus = '审计未通过（已忽略）'`，记录真实 `repairCount` 与 `issues`，不修改原审计结果，不将失败行伪标通过。
+- `canPublishIgnoredCandidate` 只检查候选基础可读性。一次回炉后，模板、时间线、声音、引用等内容审计可成为警告；不能用 `validation.valid` 再次隐性拦住用户授权的继续流程。
+- 缺少正式提示词、JSON 不完整、响应截断或其他不可用结构仍保护原成果。真实剧情材料缺失时，只交付独立可用部分；全部受阻时请求最小必要材料，不编造剧情或填空镜。
+- 正式分镜与审计附件独立，复制正文不含审计记录。忽略警告在分镜、素材、视频和计时终态中持续可见，`verification.auditPassed=false`，`auditIgnored=true`。
+- 生成、独立审核与修正请求不传 `max_tokens`，取消的是原应用 24,000 tokens 固定上限，服务端预算和 `finish_reason=length` 截断检测仍有效；连接测试保留 64 tokens。
+- 单次请求保留 5 分钟总超时；失败提示记录实际阶段，不把所有连接/响应错误都断言为网络故障。
+
+## 具名素材与视频
+
+新分镜和上传映射使用 `@准确素材名`；`uploads.asset` 与第三步素材名称逐字一致。`seedance-references.js` 只从当前正文实际引用的名称建立计划，忽略旧上传表的多余项，不按列表位置、模糊名称或素材类型猜身份。单镜最多 9 张图片，未知名称、同名歧义、错绑及缺图阻止提交。
+
+`namedReferenceKey` 使用稳定的 `asset:准确名称` 键记录所选图片版本。`migrateNamedReferencePlan` 兼容旧别名和数字选图，迁移不清空图片、成片或真人认证；用户无需维护连续编号。实际提交时由应用按有序 `imageInputs` 映射平台内部图片编号，不能把内部格式重新变成用户编辑规则。
+
+Codex 请求携带准确 `assetName`，文件按名称安全保存，例如 `周成海.png`，再次生成保留版本。旧文件不强行改名，项目按名称和类型恢复准确身份；不同身份不能只凭同一旧文件名复用。第三步 `alignAssetGenerationItems` 在全部图片就绪时同步 `completed/assets`，缺图、清空或新增项时撤销完成标记，生成和本地上传后均保存该结果。
+
+第四步提供下一镜、批量、单镜重试、提示词编辑和恢复原稿，也可添加或删除当前镜头的具名引用。删除引用只作用于当前镜头，不删除第三步文件。Seedance 支持 4–15 秒、比例/分辨率与同步音频设置；优先使用分镜结构化时长。内置规范保留的 1–3 秒文本块需合理重分块后再提交，不静默拉长或截断。
+
+视频按镜头依次提交、轮询、下载为独立 MP4。真人素材拦截时记录具体输入、`resumeIndexes` 和模式，用户完成方舟本人认证并绑定 `asset://` 后续跑。软件不代替本人完成扫码、人脸核验或授权。
+
+## 一键全流程与运行隔离
+
+`autoRunToVideo` 仅接受布尔 true，默认关闭，随项目保存及导入导出。`autoPipeline` 保存 checking / storyboard / assets / video 阶段及完成、暂停、停止状态；重载时 running 恢复为 stopped，不自动提交重复请求。
+
+自动模式启动时预检 Seedance 配置和 Codex 状态，经 preload / main 白名单把 `autoRunToVideo` 映射为工作流上下文 `videoReady`。分镜、审核及回炉使用同一 Skill 快照并带 4–15 秒整数平台适配目标，不能擅改原文或凑时长；在生图前校验原始时长、阻塞和名称引用。
+
+`continueAutoPipeline` 自动生成缺图、确认齐备，再由 `generateAutoPipelineVideos` 固定 batch 生成所有镜头。全局逐镜设置不变。自动模式任一图片或视频失败即停止后续提交并保留成果，认证后继续剩余批量任务。
+
+`generationRun`、任务所有者、项目 ID 和进度 runId / sequence 用于过滤停止或切项目后的迟到结果。停止会取消当前 Codex 图像任务并停止后续本地编排；已经提交的视频平台任务不因此自动撤销。
+
+## 后台浏览与阶段重试
+
+`activeStep` 只表示当前视图。`runningGenerationStep` 从 Codex / workflow / pipeline / video 状态派生实际运行阶段，侧栏转圈和阶段状态不跟随用户查看页面。`selectWorkflowStep` 仅增加 `viewNavigationSequence`、保存视图并重绘，不改变 `generationRun` 或取消任务。
+
+任务捕获 `viewSequence`；`focusGenerationStep`、DeepSeek 成功/失败导航仅在用户未主动切页时生效。自动子阶段继承同一序号，真人认证在保存时捕获序号再交给续跑计时器。后台更新使用 `renderWithoutMovingPage`，包括自动 `confirmLocalAssets`；生成中仍锁定原文、提示词和素材修改，允许查看和复制已有结果。
+
+`rerunCurrentStage` 独立分派：assets 追加所有可生成素材的图片版本；video 强制批量重做视频；analysis / storyboard 调用 `startGeneration(fullAuto:false)`。这些阶段按钮不读取全流程开关。关闭全流程时，左侧主入口在 assets / video 提前进入对应阶段，不要求再次提供原文或 DeepSeek 配置。`generateVideo` 只进入视频流程，不能被全流程开关带回故事分析。
+
+自动模式仅从左侧“一键生成到视频”主动启动。浏览空模块时不能展示成该模块正在生成；旧示例按钮和素材计数修改均受 busy 保护。切换其他项目仍停止当前本地任务。本轮保证后台文字浏览和阅读位置；整页刷新对已播放视频进度的保持尚未专门实现。
+
+## 结果布局与计时
+
+主结果独立滚动，第三/四步主体全宽，状态横条取代右侧窄栏。标题和 Skill 压为一行，底部进度固定保留摘要，原生 details 展开四项并保留 open 状态。已在 1440×900 与 1080×700 窗口检查结果、Skill、固定面板和预览布局。
+
+四项计时为本地提示词组装、生成与修正请求、正文前思考接收窗口、独立审计请求。思考窗口已包含在相应请求耗时中，不能重复相加；首段等待包含网络、排队和输入处理，不能伪造为服务端单独阅读提示词时间。非流式降级保留总时长，细分未知。
+
+主进程仅给发起请求的本地主 frame 发送进度，前端过滤旧任务/项目/序号，每秒更新显示，每 5 秒或终态存储。只传字符数和统计，不转发思考原文或完整提示词。终态冻结，重启未结束任务恢复已停止；审计忽略结果保持 completed 且以琥珀色标识警告。
+
+## 1.0 更新记录（2026-10-20）
+
+- 将今日优化统一交付为 1.0，使用 v1.0 发行标签、release-v1.0 目录及 StoryForge-Setup-1.0-x64.exe。
+- 整合四步工作流、DeepSeek V4.1 Flash、GPT 订阅生图和 Seedance 单镜/批量视频。
+- 提供分镜与资产本地 Skill、最多一次回炉及真实警告继续、取消应用固定输出上限。
+- 增加全流程开关、视频时长适配、失败保留和认证续跑。
+- 扩大结果区、固定计时可展开、具名素材与文件版本、齐备即完成、旧项目迁移。
+- 生成中可跨模块浏览且不抢页；参考图和视频重试仅执行本阶段。
+- 250 项离线测试通过；构建和桌面模拟不替代真实模型全流程或安装验收。
+
+## 历史交付记录
+
+以下是本次正式版本前的阶段记录，旧行为以本文当前规则和 README 的 1.0 说明为准。完整逐版记录保留在 [README 更新记录](README.md#更新记录)。
+
+| 阶段版本 | 主要交付 | 当时的离线回归记录 |
+| --- | --- | --- |
+| 0.11.15 | 后台浏览、导航隔离、阶段重试修复 | 247 项 |
+| 0.11.14 | 放大结果区、具名引用、图片命名及完成状态 | 239 项 |
+| 0.11.13 | 一键全流程、自动批量视频、失败与认证续跑 | 206 项 |
+| 0.11.12 | 分镜/资产 Skill 上传与实际生图指令 | 190 项 |
+| 0.11.10 | 一次回炉后保留审计失败并继续 | 156 项 |
+| 0.11.9 | 流式阶段观测与固定耗时面板 | 130 项 |
+| 0.11.8 | 制作流程缩为四步，旧项目迁移 | 98 项 |
+| 0.11.7 | 取消应用侧 24,000 tokens 固定上限 | 91 项 |
+| 0.11.6 及以前 | 完整 v2.1、本机订阅生图、早期视频与素材能力 | 详见 README 历史记录 |
+
+历史桌面检查使用隔离的本机配置和模型替身，覆盖候选、审计、实际一次回炉、忽略继续、不可用候选保护、文档解析、具名引用迁移、完整自动链和后台浏览。已有一次真实订阅单图及 PNG 保存记录不等同于其他账号、真实批量生图或完整视频链路验收。
+
+## 后续维护要求
+
+保持真实姓名、原声和明确的用户授权，不能把模型自述视为改写剧情的授权。局部改稿、重分块或修改引用后，应按影响范围核对，旧审计不能代表已经变化的正文。发布时同时更新 README 当前能力、更新记录、交接说明及安装包名称/目录；历史记录保留其当时的语境。

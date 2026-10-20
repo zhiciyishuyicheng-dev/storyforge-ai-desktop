@@ -40,16 +40,16 @@ function numericValue(value) {
   return chinese ? chineseNumber(chinese[0]) : Number.NaN;
 }
 
-export function normalizeSeedanceDuration(value, fallback = 5) {
+export function normalizeSeedanceDuration(value, fallback = 5, { minimum = SEEDANCE_MIN_DURATION } = {}) {
   const fallbackValue = numericValue(fallback);
   const parsed = numericValue(value);
   const duration = Number.isFinite(parsed) ? parsed : Number.isFinite(fallbackValue) ? fallbackValue : 5;
-  return Math.max(SEEDANCE_MIN_DURATION, Math.min(SEEDANCE_MAX_DURATION, Math.ceil(duration)));
+  return Math.max(minimum, Math.min(SEEDANCE_MAX_DURATION, Math.ceil(duration)));
 }
 
-export function extractSeedanceDuration(prompt, fallback = 5) {
+export function extractSeedanceDuration(prompt, fallback = 5, options = {}) {
   const text = String(prompt || '');
-  if (!text.trim()) return normalizeSeedanceDuration(fallback);
+  if (!text.trim()) return normalizeSeedanceDuration(fallback, 5, options);
 
   const declaredPatterns = [
     new RegExp(`(?:视频总时长|总时长|视频时长|时长)[：:为是\\s]*${DURATION_VALUE_PATTERN}\\s*秒`, 'i'),
@@ -58,17 +58,26 @@ export function extractSeedanceDuration(prompt, fallback = 5) {
   ];
   for (const pattern of declaredPatterns) {
     const match = text.match(pattern);
-    if (match) return normalizeSeedanceDuration(match[1], fallback);
+    if (match) return normalizeSeedanceDuration(match[1], fallback, options);
   }
 
   const rangePattern = new RegExp(`${DURATION_VALUE_PATTERN}\\s*(?:至|到|-|—|~|～)\\s*${DURATION_VALUE_PATTERN}\\s*秒`, 'gi');
   const endpoints = [...text.matchAll(rangePattern)].map((match) => numericValue(match[2])).filter(Number.isFinite);
-  if (endpoints.length) return normalizeSeedanceDuration(Math.max(...endpoints), fallback);
+  if (endpoints.length) return normalizeSeedanceDuration(Math.max(...endpoints), fallback, options);
 
-  return normalizeSeedanceDuration(fallback);
+  return normalizeSeedanceDuration(fallback, 5, options);
 }
 
-export function resolveSeedanceDuration(explicitDuration, prompt, fallback = 5) {
-  if (Number.isFinite(numericValue(explicitDuration))) return normalizeSeedanceDuration(explicitDuration, fallback);
-  return extractSeedanceDuration(prompt, fallback);
+export function resolveSeedanceDuration(explicitDuration, prompt, fallback = 5, options = {}) {
+  if (Number.isFinite(numericValue(explicitDuration))) return normalizeSeedanceDuration(explicitDuration, fallback, options);
+  return extractSeedanceDuration(prompt, fallback, options);
+}
+
+// A valid storyboard can contain natural short blocks even when the video API cannot.
+export function normalizeStoryboardDuration(value, fallback = 5) {
+  return normalizeSeedanceDuration(value, fallback, { minimum: 1 });
+}
+
+export function resolveStoryboardDuration(explicitDuration, prompt, fallback = 5) {
+  return resolveSeedanceDuration(explicitDuration, prompt, fallback, { minimum: 1 });
 }

@@ -1,8 +1,19 @@
 const { app, BrowserWindow, shell, ipcMain, safeStorage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('url');
-const { SYSTEM_PROMPT, makeUserPrompt } = require('./deepseek-prompt.cjs');
+const { createWorkflowRunner } = require('./deepseek-workflow.cjs');
+const { createDeepSeekClient } = require('./deepseek-client.cjs');
+const { importSkillDocument } = require('./skill-documents.cjs');
+const { normalizeSkillDocument, normalizeStageSkills } = require('./stage-skills.cjs');
+const callDeepSeek = createDeepSeekClient();
+const {
+  getStatus: getCodexImageStatus,
+  generateAndSave: generateCodexImageAndSave,
+  cancel: cancelCodexImage,
+  cancelAll: cancelAllCodexImages,
+} = require('./codex-image.cjs');
 const {
   DEFAULT_MODEL: SEEDREAM_DEFAULT_MODEL,
   DEFAULT_SIZE: SEEDREAM_DEFAULT_SIZE,
@@ -38,9 +49,8 @@ const {
 const SEEDANCE_DEFAULT_GENERATION_MODE = 'batch';
 const SEEDANCE_GENERATION_MODES = ['batch', 'confirm'];
 
-const MODEL = 'deepseek-v4-pro';
-const API_URL = 'https://api.deepseek.com/chat/completions';
-// 第五步暂时停用 Seedream / GPT Image 模型生图，改为用户上传本地参考图。
+const MODEL = 'deepseek-flash';
+// 视觉素材停用付费 API 生图，使用本机 Codex 的 ChatGPT 订阅或本地上传。
 const IMAGE_MODEL_GENERATION_ENABLED = false;
 const LOCAL_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
 
@@ -48,6 +58,24 @@ function settingsPath() { return path.join(app.getPath('userData'), 'deepseek-se
 function seedreamSettingsPath() { return path.join(app.getPath('userData'), 'seedream-settings.json'); }
 function openAIImageSettingsPath() { return path.join(app.getPath('userData'), 'openai-image-settings.json'); }
 function seedanceSettingsPath() { return path.join(app.getPath('userData'), 'seedance-settings.json'); }
+function codexImageSettingsPath() { return path.join(app.getPath('userData'), 'codex-image-settings.json'); }
+
+function readCodexImageSettings() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(codexImageSettingsPath(), 'utf8'));
+    return { preferredPath: typeof saved.cliPath === 'string' ? saved.cliPath : '' };
+  } catch { return { preferredPath: '' }; }
+}
+
+function assertCodexImageSender(event) {
+  const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
+  const actual = String(event.senderFrame?.url || '').split(/[?#]/)[0];
+  if (actual !== expected || event.senderFrame !== event.sender.mainFrame) {
+    throw new Error('只能从 StoryForge 主窗口使用订阅生图。');
+  }
+}
+
+const codexImageOwners = new Map();
 
 function readStoredKey() {
   try {
@@ -182,77 +210,18 @@ function uniqueLocalAssetPath(directory, baseName, extension) {
   return target;
 }
 
-async function callDeepSeek(apiKey, messages, maxTokens = 24000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300000);
-  let response;
-  try {
-    response = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: MODEL, messages, response_format: { type: 'json_object' }, temperature: 0.35, max_tokens: maxTokens, stream: false }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error?.name === 'AbortError') throw new Error('DeepSeek 请求超过五分钟，请检查网络后重试。');
-    throw new Error(`无法连接 DeepSeek：${error?.message || '网络请求失败'}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-  const text = await response.text();
-  let payload;
-  try { payload = JSON.parse(text); } catch { throw new Error(`DeepSeek 返回了无法解析的响应（${response.status}）。`); }
-  if (!response.ok) throw new Error(payload?.error?.message || `DeepSeek 请求失败（${response.status}）。`);
-  const content = payload?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('DeepSeek 没有返回生成内容，请重试。');
-  let data;
-  try { data = JSON.parse(content); } catch { throw new Error('DeepSeek 返回的内容不是有效 JSON，请重试。'); }
-  if (messages.some((message) => message.content?.includes('原始剧本'))) validateWorkflow(data);
-  return { data, usage: payload.usage || null, model: payload.model || MODEL };
-}
-
-function validateWorkflow(data) {
-  const characters = data?.analysis?.characters;
-  const scenes = data?.script?.scenes;
-  const shots = data?.storyboard?.shots;
-  const assets = data?.assets;
-  if (!Array.isArray(characters) || !characters.length) throw new Error('DeepSeek 未返回有效人物列表，请重试。');
-  if (!Array.isArray(scenes) || !scenes.length) throw new Error('DeepSeek 未返回有效剧本场次，请重试。');
-  if (!Array.isArray(shots) || shots.length < 3) throw new Error('DeepSeek 返回的分镜数量不足，请重试。');
-  if (!assets || !Array.isArray(assets.characters) || !Array.isArray(assets.scenes) || !Array.isArray(assets.groups) || !Array.isArray(assets.props)) throw new Error('DeepSeek 未返回完整的参考素材清单，请重试。');
-  const assetItems = [...assets.characters, ...assets.scenes, ...assets.groups, ...assets.props];
-  const assetNames = assetItems.map((item) => String(item?.name || '').trim());
-  if (assetNames.some((name) => !name)) throw new Error('DeepSeek 返回了缺少名称的参考素材，请重试。');
-  if (new Set(assetNames).size !== assetNames.length) throw new Error('DeepSeek 返回了同名参考素材，无法建立唯一绑定，请重试。');
-  const assetNameSet = new Set(assetNames);
-  for (const shot of shots) {
-    if (!Array.isArray(shot.uploads) || !shot.uploads.length || !Array.isArray(shot.segments) || !shot.segments.length || !shot.prompt) throw new Error(`镜头 ${shot.no || ''} 数据不完整，请重试。`);
-    if (shot.uploads.length > 9) throw new Error(`镜头 ${shot.no || ''} 超过九张参考图限制，请重试。`);
-    const refs = shot.uploads.map((upload) => Number(String(upload?.ref || '').match(/^@Image(\d+)$/i)?.[1] || 0));
-    if (refs.some((number, index) => number !== index + 1)) throw new Error(`镜头 ${shot.no || ''} 的 @Image 编号必须从一连续排列，请重试。`);
-    const promptRefs = [...String(shot.prompt).matchAll(/@Image(\d+)/gi)]
-      .map((match) => Number(match[1]))
-      .filter((number, index, values) => values.indexOf(number) === index)
-      .sort((left, right) => left - right);
-    if (promptRefs.length !== refs.length || refs.some((number, index) => promptRefs[index] !== number)) throw new Error(`镜头 ${shot.no || ''} 的提示词引用与上传计划不一致，请重试。`);
-    for (const upload of shot.uploads) {
-      const assetName = String(upload?.asset || '').trim();
-      const purpose = String(upload?.purpose || '').trim();
-      if (!assetName || !purpose || !assetNameSet.has(assetName)) throw new Error(`镜头 ${shot.no || ''} 引用了素材清单中不存在的名称“${assetName || '空名称'}”，请重试。`);
-      if (!String(shot.prompt).includes(assetName)) throw new Error(`镜头 ${shot.no || ''} 的提示词没有点名素材“${assetName}”，请重试。`);
-    }
-    const withoutRefs = String(shot.prompt).replace(/@(Image|Video|Audio)\d+/g, '');
-    if (/[A-Za-z]{2,}/.test(withoutRefs)) throw new Error(`镜头 ${shot.no || ''} 含有中英文混排，已拒绝本次结果，请重新生成。`);
-  }
-  if (!Array.isArray(assets.characterChecklist) || !assets.characterChecklist.length) throw new Error('DeepSeek 未返回人物参考图清单，请重试。');
-  if (!Array.isArray(assets.characterDifferenceMatrix) || !assets.characterDifferenceMatrix.length) throw new Error('DeepSeek 未返回人物差异化视觉锚点矩阵，请重试。');
-  if (!Array.isArray(assets.characters) || assets.characters.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的人物参考图提示词不完整，请重试。');
-  const requiredCharacters = assets.characterChecklist.filter((item) => item.requiresReferenceImage ?? item.requiresTurnaround).map((item) => String(item.name || '').trim()).filter(Boolean);
-  const renderedCharacters = new Set(assets.characters.map((item) => String(item.name || '').trim()));
-  if (requiredCharacters.some((name) => !renderedCharacters.has(name))) throw new Error('DeepSeek 漏掉了需要独立参考图的重要人物，请重试。');
-  if (!Array.isArray(assets.scenes) || !assets.scenes.length || assets.scenes.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的场景参考图提示词不完整，请重试。');
-  if (!Array.isArray(assets.props) || assets.props.some((item) => !item.name || !item.fileName || !item.prompt)) throw new Error('DeepSeek 返回的道具参考图提示词不完整，请重试。');
-}
+ipcMain.handle('skills:import-document', async (event, rawTask = {}) => {
+  const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口上传 Skill。');
+  if (!['storyboard', 'assets'].includes(rawTask?.stage)) throw new Error('请选择分镜或素材阶段上传 Skill。');
+  const selection = await dialog.showOpenDialog({
+    title: rawTask.stage === 'storyboard' ? '选择分镜生成 Skill 文档' : '选择视觉素材 Skill 文档',
+    properties: ['openFile'],
+    filters: [{ name: 'Skill 文档（TXT / Markdown / Word / PDF）', extensions: ['txt', 'md', 'docx', 'pdf'] }],
+  });
+  if (selection.canceled || !selection.filePaths?.length) return null;
+  return normalizeSkillDocument(await importSkillDocument(selection.filePaths[0]));
+});
 
 ipcMain.handle('deepseek:get-status', () => ({ configured: Boolean(readStoredKey()), model: MODEL }));
 ipcMain.handle('deepseek:save-key', (_event, rawKey) => {
@@ -264,15 +233,36 @@ ipcMain.handle('deepseek:save-key', (_event, rawKey) => {
 ipcMain.handle('deepseek:test', async (_event, rawKey) => {
   const apiKey = String(rawKey || '').trim() || readStoredKey();
   if (!apiKey) throw new Error('请先输入 DeepSeek API Key。');
-  await callDeepSeek(apiKey, [{ role: 'system', content: '你只输出 JSON。' }, { role: 'user', content: '输出 {"ok":true}' }], 64);
+  const tested = await callDeepSeek(apiKey, [{ role: 'system', content: '你只输出 JSON。' }, { role: 'user', content: '输出 {"ok":true}' }], 64);
+  if (tested.truncated || tested.data?.ok !== true) throw new Error('DeepSeek 未返回有效的连接测试结果，请重试。');
   return { ok: true, model: MODEL };
 });
-ipcMain.handle('deepseek:generate-workflow', async (_event, rawScript) => {
+ipcMain.handle('deepseek:generate-workflow', async (event, rawScript, rawRun = {}) => {
+  const sender = event.sender;
+  const frame = event.senderFrame;
+  const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
+  if (frame !== sender.mainFrame || String(frame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口生成分镜。');
+  const run = rawRun && typeof rawRun === 'object' && !Array.isArray(rawRun) ? rawRun : {};
+  for (const key of ['runId', 'projectId']) if (run[key] !== undefined && (typeof run[key] !== 'string' || run[key].length > 128)) throw new Error('生成任务标识无效，请重新开始。');
+  if (run.autoRunToVideo !== undefined && typeof run.autoRunToVideo !== 'boolean') throw new Error('全流程自动生成开关无效，请重新设置。');
+  const runId = run.runId || randomUUID();
+  const projectId = run.projectId || '';
+  const stageSkills = normalizeStageSkills(run.stageSkills);
+  const onProgress = snapshot => {
+    try {
+      if (!sender.isDestroyed() && sender.mainFrame === frame && String(frame.url || '').split(/[?#]/)[0] === expected) frame.send('deepseek:workflow-progress', { ...snapshot, runId, projectId });
+    } catch { /* A closed/navigated renderer cannot consume this task's progress. */ }
+  };
   const apiKey = readStoredKey();
   if (!apiKey) throw new Error('尚未配置 DeepSeek API Key。');
   const script = String(rawScript || '').trim();
   if (!script) throw new Error('剧本不能为空。');
-  return callDeepSeek(apiKey, [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: makeUserPrompt(script) }]);
+  const generateWorkflow = createWorkflowRunner({
+    request: (messages, options) => callDeepSeek(apiKey, messages, undefined, options.onProgress),
+    onProgress,
+  });
+  const result = await generateWorkflow(script, { ratio: readSeedanceSettings().ratio, stageSkills, ...(run.autoRunToVideo === true ? { videoReady: true } : {}) });
+  return { ...result, progress: { ...result.progress, runId, projectId } };
 });
 
 ipcMain.handle('seedream:get-status', () => {
@@ -301,7 +291,7 @@ ipcMain.handle('seedream:test', async (_event, rawKey) => {
   return { ok: true };
 });
 ipcMain.handle('seedream:generate-image', async (_event, rawTask) => {
-  if (!IMAGE_MODEL_GENERATION_ENABLED) throw new Error('第五步模型生图已暂停，请改用本地参考图上传。');
+  if (!IMAGE_MODEL_GENERATION_ENABLED) throw new Error('付费 API 生图已暂停，请使用 GPT 订阅生图或本地参考图上传。');
   const settings = readSeedreamSettings();
   if (!settings.apiKey) throw new Error('尚未配置火山方舟 API Key。');
   const model = String(rawTask?.model || settings.model);
@@ -348,7 +338,7 @@ ipcMain.handle('openai-image:test', async (_event, rawKey) => {
   return { ok: true, model: OPENAI_IMAGE_MODEL };
 });
 ipcMain.handle('openai-image:generate-image', async (_event, rawTask) => {
-  if (!IMAGE_MODEL_GENERATION_ENABLED) throw new Error('第五步模型生图已暂停，请改用本地参考图上传。');
+  if (!IMAGE_MODEL_GENERATION_ENABLED) throw new Error('付费 API 生图已暂停，请使用 GPT 订阅生图或本地参考图上传。');
   const settings = readOpenAIImageSettings();
   if (!settings.apiKey) throw new Error('尚未配置 OpenAI API Key。');
   const size = String(rawTask?.size || settings.size);
@@ -366,6 +356,58 @@ ipcMain.handle('openai-image:generate-image', async (_event, rawTask) => {
     fileName: String(rawTask?.fileName || ''),
     index: Number(rawTask?.index || 0),
   });
+});
+ipcMain.handle('codex-image:get-status', async (event) => {
+  assertCodexImageSender(event);
+  return getCodexImageStatus(readCodexImageSettings());
+});
+ipcMain.handle('codex-image:choose-cli', async (event) => {
+  assertCodexImageSender(event);
+  const selection = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: '选择本机 Codex 程序（codex.exe）',
+    properties: ['openFile'],
+    filters: [{ name: 'Codex 程序', extensions: ['exe'] }],
+  });
+  if (selection.canceled || !selection.filePaths.length) {
+    return { ...(await getCodexImageStatus(readCodexImageSettings())), canceled: true };
+  }
+  const cliPath = selection.filePaths[0];
+  if (path.basename(cliPath).toLowerCase() !== 'codex.exe') throw new Error('请选择官方 Codex 程序 codex.exe。');
+  const status = await getCodexImageStatus({ preferredPath: cliPath });
+  if (status.available) fs.writeFileSync(codexImageSettingsPath(), JSON.stringify({ cliPath }, null, 2), 'utf8');
+  return status;
+});
+ipcMain.handle('codex-image:generate', async (event, rawTask) => {
+  assertCodexImageSender(event);
+  const jobId = String(rawTask?.jobId || '');
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(jobId)) throw new Error('订阅生图任务编号无效。');
+  if (codexImageOwners.has(jobId)) throw new Error('这个订阅生图任务正在进行中。');
+  const prompt = String(rawTask?.prompt || '').trim();
+  if (!prompt || prompt.length > 80000) throw new Error('生图描述不能为空，且不能超过 80000 字。');
+  const assetSkill = normalizeSkillDocument(rawTask?.assetSkill);
+  const index = Number(rawTask?.index ?? 0);
+  if (!Number.isInteger(index) || index < 0 || index > 10000) throw new Error('参考图素材编号无效。');
+  codexImageOwners.set(jobId, event.sender.id);
+  try {
+    return await generateCodexImageAndSave({
+      ...readCodexImageSettings(),
+      prompt,
+      assetSkill,
+      index,
+      jobId,
+      projectId: String(rawTask?.projectId || 'project'),
+      projectTitle: String(rawTask?.projectTitle || '未命名短剧项目'),
+      fileName: String(rawTask?.fileName || ''),
+      assetName: String(rawTask?.assetName || ''),
+      outputRoot: app.getPath('documents'),
+    });
+  } finally { codexImageOwners.delete(jobId); }
+});
+ipcMain.handle('codex-image:cancel', (event, rawJobId) => {
+  assertCodexImageSender(event);
+  const jobId = String(rawJobId || '');
+  if (codexImageOwners.get(jobId) !== event.sender.id) return { canceled: false };
+  return { canceled: cancelCodexImage(jobId) };
 });
 ipcMain.handle('assets:select-local-images', async (_event, rawTask) => {
   const selection = await dialog.showOpenDialog({
@@ -566,6 +608,13 @@ const createWindow = () => {
     },
   });
 
+  const ownerId = win.webContents.id;
+  win.webContents.once('destroyed', () => {
+    for (const [jobId, senderId] of codexImageOwners) {
+      if (senderId === ownerId) cancelCodexImage(jobId);
+    }
+  });
+
   win.once('ready-to-show', () => win.show());
   win.webContents.setZoomFactor(1.05);
   win.webContents.on('before-input-event', (event, input) => {
@@ -599,3 +648,5 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+app.on('before-quit', () => cancelAllCodexImages());
