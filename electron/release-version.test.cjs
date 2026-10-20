@@ -54,6 +54,23 @@ test('字面1.0仅适配根包内存校验，源文件/lock/打包元数据/安�
   await assert.rejects(metadata.readPackageJson(project.jsonPath), /Invalid version: "1\.0"/);
 });
 
+test('三段版本1.0.1使用标准校验并保留安装包和Windows版本号，兼容器不改写文件', async t => {
+  const project = await fixture(t, '1.0.1');
+  const before = await fs.readFile(project.jsonPath);
+  const restore = installShortReleaseVersionCompatibility(project.root);
+  try {
+    const data = await metadata.readPackageJson(project.jsonPath);
+    const packed = JSON.parse(await createTransformer(project.root, {}, null, null)(project.jsonPath));
+    assert.equal(data.version, '1.0.1');
+    assert.equal(packed.version, '1.0.1');
+    const info = new AppInfo({ metadata: data, config: {}, devMetadata: data });
+    assert.equal(info.getVersionInWeirdWindowsForm(), '1.0.1.0');
+    assert.equal(expandMacro('StoryForge-Setup-${version}-${arch}.${ext}', 'x64', info, { ext: 'exe' }), 'StoryForge-Setup-1.0.1-x64.exe');
+    assert.deepEqual(await fs.readFile(project.jsonPath), before);
+  } finally { restore(); }
+  assert.equal((await metadata.readPackageJson(project.jsonPath)).version, '1.0.1');
+});
+
 test('适配不放宽其他版本或其余元数据校验，卸载后完整恢复原函数', async t => {
   const project = await fixture(t, '1.0-invalid');
   const readBefore = metadata.readPackageJson;

@@ -653,6 +653,7 @@ function videoReferenceBindingTemplate(index, prompt, item) {
 function videoGenerationTemplate() {
   const prompts = project.outputs.storyboard?.prompts || [];
   const state = project.videoGeneration || defaultProject.videoGeneration;
+  reconcilePortraitCertification(state);
   const items = Array.isArray(state.items) ? state.items : [];
   const generationMode = effectiveVideoGenerationMode(state);
   const confirmMode = generationMode === 'confirm';
@@ -692,7 +693,7 @@ function videoGenerationTemplate() {
       ? `<div class="video-clip-preview"><video src="${esc(String(item.videoFileUrl))}" controls preload="metadata"></video><button data-show-video-index="${index}">在文件夹中查看</button></div>`
       : `<div class="video-clip-placeholder ${esc(String(item.status || 'pending'))}"><span>${['creating', 'queued', 'running', 'downloading'].includes(item.status) ? '▶' : ['failed', 'certification'].includes(item.status) ? '!' : String(index + 1).padStart(2, '0')}</span><b>${esc(label)}</b>${item.taskId ? `<small>${esc(String(item.taskId))}</small>` : ''}</div>`;
     const action = needsCertification
-      ? `<button class="primary-button generate-one-video" data-open-portrait-certification="${index}" ${project.running ? 'disabled' : ''}>完成认证并继续</button>`
+      ? `<button class="outline-button generate-one-video" data-generate-video-index="${index}" ${project.running ? 'disabled' : ''}>重新生成此镜头</button><button class="outline-button generate-one-video" data-open-portrait-certification="${index}" ${project.running ? 'disabled' : ''}>完成认证并继续</button>`
       : `<button class="outline-button generate-one-video" data-generate-video-index="${index}" ${project.running ? 'disabled' : ''}>${item.status === 'success' ? '重新生成此镜头' : item.status === 'failed' ? '重试此镜头' : '生成此镜头'}</button>`;
     return `<article class="video-clip-card">${media}<div class="video-clip-copy"><div><span>镜头 ${String(index + 1).padStart(2, '0')} · ${duration} 秒</span><h4>${esc(String(item.fileName || `镜头-${String(index + 1).padStart(2, '0')}.mp4`))}</h4><div class="video-prompt-editor-head"><b>视频生成提示词</b><span class="${promptEdited ? 'edited' : ''}" data-video-prompt-status="${index}">${promptEdited ? '已修改 · 自动保存' : '原始提示词 · 自动保存'}</span><button class="reset-video-prompt" data-reset-video-prompt-index="${index}" ${project.running || !promptEdited ? 'disabled' : ''}>恢复原始提示词</button></div><textarea class="video-prompt-editor" data-video-prompt-index="${index}" aria-label="镜头 ${String(index + 1).padStart(2, '0')} 视频生成提示词" ${project.running ? 'disabled' : ''}>${esc(editablePrompt)}</textarea>${videoReferenceBindingTemplate(index, editablePrompt, item)}</div><b class="video-task-status ${esc(String(item.status || 'pending'))}">${esc(label)}</b>${item.error ? `<div class="video-task-error">${esc(cleanRemoteError(item.error, '生成失败'))}</div>` : ''}${action}</div></article>`;
   }).join('');
@@ -1831,6 +1832,64 @@ function resetVideoItemAfterReferenceChange(item, state) {
   state.lastError = '';
   state.generatedCount = state.items.filter((videoItem) => videoItem.status === 'success').length;
   project.completed = project.completed.filter((id) => id !== 'video');
+  reconcilePortraitCertification(state);
+}
+
+function samePortraitReference(input, file) {
+  if (!file || (input.assetName && input.assetName !== file.assetName)) return false;
+  const rejectedId = normalizeTrustedAssetId(input.assetId);
+  const selectedId = normalizeTrustedAssetId(file.trustedAssetId);
+  if (rejectedId || selectedId) return rejectedId === selectedId;
+  if (input.localPath) return input.localPath === file.localPath;
+  return input.assetItemIndex === file.assetItemIndex && input.fileIndex === file.fileIndex;
+}
+
+function reconcilePortraitCertification(state) {
+  const pending = state?.pendingCertification;
+  if (!pending?.blockedInputs?.length) return false;
+  const index = Number(pending.shotIndex);
+  const item = state.items?.[index];
+  const plan = resolveStrictReferencePlan({
+    prompt: effectiveVideoPrompt(index, project.outputs.storyboard?.prompts?.[index], state),
+    shot: project.outputs.storyboard?.shots?.[index] || {},
+    assetItems: project.assetGeneration?.items || [],
+    savedBindings: item?.referenceBindings || {},
+  });
+  // A platform rejection belongs to the submitted files, not their list slots.
+  const blockedInputs = pending.blockedInputs.flatMap(input => {
+    const binding = plan.bindings.find(binding => samePortraitReference(input, binding.selected));
+    return binding ? [{ ...input, assetItemIndex: binding.selected.assetItemIndex, fileIndex: binding.selected.fileIndex, contentIndex: binding.number, referenceNumber: binding.number }] : [];
+  });
+  state.pendingCertification = blockedInputs.length ? { ...pending, blockedInputs } : null;
+  const changed = blockedInputs.length !== pending.blockedInputs.length;
+  if (changed && !blockedInputs.length) resetVideoItemAfterReferenceChange(item, state);
+  return changed;
+}
+
+function replaceBlockedPortraitReference(assetItemIndex, file) {
+  const state = project.videoGeneration;
+  const pending = state?.pendingCertification;
+  if (!pending?.blockedInputs?.length || !file) return;
+  const shotIndex = Number(pending.shotIndex);
+  const item = state.items?.[shotIndex];
+  if (!item) return;
+  const plan = resolveStrictReferencePlan({
+    prompt: effectiveVideoPrompt(shotIndex, project.outputs.storyboard?.prompts?.[shotIndex], state),
+    shot: project.outputs.storyboard?.shots?.[shotIndex] || {},
+    assetItems: project.assetGeneration?.items || [],
+    savedBindings: item.referenceBindings || {},
+  });
+  let changed = false;
+  for (const binding of plan.bindings) {
+    if (binding.selected?.assetItemIndex !== assetItemIndex
+      || !pending.blockedInputs.some(input => samePortraitReference(input, binding.selected))) continue;
+    item.referenceBindings = { ...item.referenceBindings, [binding.key]: {
+      assetName: binding.selected.assetName, localPath: file.localPath,
+      trustedAssetId: normalizeTrustedAssetId(file.trustedAssetId), sourceName: String(file.sourceName || file.fileName || ''),
+    } };
+    changed = true;
+  }
+  if (changed) resetVideoItemAfterReferenceChange(item, state);
 }
 
 function materializeLegacyVideoUploads(shotIndex, prompt, item) {
@@ -1951,6 +2010,10 @@ function isValidTrustedAssetId(value) {
 function savePortraitCertificationAndResume() {
   const ownerProject = project;
   const state = project.videoGeneration;
+  if (reconcilePortraitCertification(state)) {
+    saveProject(); renderWithoutMovingPage();
+    return showToast('参考图已更换，请使用当前参考图重新生成视频');
+  }
   const pending = state?.pendingCertification;
   const blockedInputs = Array.isArray(pending?.blockedInputs) ? pending.blockedInputs : [];
   if (!blockedInputs.length) return setPortraitCertificationMessage('没有找到需要认证的参考图，请关闭窗口后重新生成镜头。', 'error');
@@ -2075,6 +2138,9 @@ async function selectLocalAssetImages(index) {
     state.generatedCount = state.items.filter((item) => item.files.length).length;
     state.status = state.generatedCount === prompts.length ? 'complete' : 'pending';
     alignAssetGenerationItems(prompts);
+    const replacement = merged.find(file => result.files.some(uploaded => uploaded.localPath === file.localPath)
+      && !existing.some(previous => previous.localPath === file.localPath));
+    replaceBlockedPortraitReference(index, replacement);
     saveProject(); renderWithoutMovingPage(scrollPositions);
     showToast(`${prompt.name || '当前素材'}已上传 ${result.files.length} 张参考图`);
     return result;
@@ -2092,6 +2158,7 @@ function clearLocalAssetImages(index) {
   state.generatedCount = state.items.filter((item) => item.files.length).length;
   state.status = 'pending';
   project.completed = project.completed.filter((id) => id !== 'assets');
+  reconcilePortraitCertification(project.videoGeneration);
   saveProject(); render();
   showToast('已清空此项的参考图关联，磁盘中的原文件仍然保留');
 }
@@ -2575,6 +2642,7 @@ function alignVideoGenerationItems(prompts) {
   state.totalCount = prompts.length;
   state.generatedCount = state.items.filter((item) => item.status === 'success').length;
   project.videoGeneration = state;
+  reconcilePortraitCertification(state);
   return state;
 }
 
@@ -2683,11 +2751,9 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
     }
   }
   if (state.pendingCertification && selection.requested.includes(Number(state.pendingCertification.shotIndex))) {
-    project.running = false;
-    focusGenerationStep('video', videoFocus);
-    saveProject(); renderWithoutMovingPage();
-    if (project.activeStep === 'video') openPortraitCertificationModal();
-    return;
+    const rejectedItem = state.items[Number(state.pendingCertification.shotIndex)];
+    state.pendingCertification = null;
+    resetVideoItemAfterReferenceChange(rejectedItem, state);
   }
   if (force) {
     for (const index of selection.reset) state.items[index] = { ...state.items[index], status: 'pending', taskId: '', error: '' };

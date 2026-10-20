@@ -981,6 +981,108 @@ test('引用选择只切换同名图片版本并保存稳定名称键，跨人�
   assert.equal(h.run('prepareSeedancePrompt(effectiveVideoPrompt(0,project.outputs.storyboard.prompts[0]),0).imagePaths[0]'), 'C:/aning-variant.png');
 });
 
+function prepareBlockedReferenceProject(h, numbers = [1]) {
+  prepareNamedReferenceProject(h);
+  h.context.blockedNumbers = numbers;
+  h.run(`
+    const rejected = prepareSeedancePrompt(project.outputs.storyboard.prompts[0], 0);
+    project.videoGeneration.pendingCertification = {
+      shotIndex: 0,
+      blockedInputs: rejected.imageInputs.filter(input => blockedNumbers.includes(input.referenceNumber))
+        .map(input => ({...input, contentIndex: input.referenceNumber})),
+      resumeIndexes: [0], mode: 'confirm',
+    };
+    project.videoGeneration.items[0].status = 'certification';
+    project.videoGeneration.items[0].error = '旧参考图需要真人认证';
+    project.videoGeneration.status = 'awaiting-certification';
+  `);
+}
+
+test('更换被拦截的参考图后清除旧认证记录，重新提交实际选中的新图', async () => {
+  const { h, calls } = autoPipelineHarness();
+  prepareBlockedReferenceProject(h);
+  assert.equal(h.run('selectVideoReference(0,1,0,1)'), true);
+  assert.equal(h.run('project.videoGeneration.pendingCertification'), null);
+  assert.equal(h.run('project.videoGeneration.items[0].status'), 'pending');
+  await h.run('generateSeedanceVideos({token:++generationRun,indexes:[0],mode:"confirm"})');
+  assert.equal(calls.creates.length, 1);
+  assert.equal(calls.creates[0].imageInputs[0].localPath, 'C:/aning-variant.png');
+  assert.equal(calls.downloads.length, 1);
+  assert.equal(h.run('project.videoGeneration.items[0].status'), 'success');
+});
+
+test('依次为多项被拦截素材追加新图，只替换对应引用并逐项清除旧认证', async () => {
+  const { h, calls } = autoPipelineHarness();
+  h.context.window.storyforgeAI.selectLocalAssetImages = async ({ index }) => ({ files: [{ localPath: `C:/replacement-${index}.png` }] });
+  prepareBlockedReferenceProject(h, [1, 2]);
+  await h.run('selectLocalAssetImages(0)');
+  assert.deepEqual(h.snapshot('project.videoGeneration.pendingCertification.blockedInputs.map(input=>input.assetName)'), ['书房（白天）']);
+  assert.equal(h.run('prepareSeedancePrompt(project.outputs.storyboard.prompts[0],0).imagePaths[0]'), 'C:/replacement-0.png');
+  await h.run('selectLocalAssetImages(1)');
+  assert.equal(h.run('project.videoGeneration.pendingCertification'), null);
+  assert.equal(h.run('project.assetGeneration.items[0].files[0].localPath'), 'C:/reference-0.png');
+  await h.run('generateSeedanceVideos({token:++generationRun,indexes:[0]})');
+  assert.deepEqual(calls.creates[0].imagePaths, ['C:/replacement-0.png', 'C:/replacement-1.png']);
+  assert.equal(calls.creates[0].imageInputs[0].assetId, '');
+  assert.equal(calls.downloads.length, 1);
+});
+
+test('清空旧图再上传后不再受旧认证记录阻拦，旧可信素材编号不附到新图', async () => {
+  const { h, calls } = autoPipelineHarness();
+  h.context.window.storyforgeAI.selectLocalAssetImages = async () => ({ files: [{ localPath: 'C:/new-upload.png' }] });
+  prepareBlockedReferenceProject(h);
+  h.run('project.assetGeneration.items[0].files[0].trustedAssetId = "asset-old-portrait"; clearLocalAssetImages(0)');
+  assert.equal(h.run('project.videoGeneration.pendingCertification'), null);
+  await h.run('selectLocalAssetImages(0)');
+  await h.run('generateSeedanceVideos({token:++generationRun,indexes:[0]})');
+  assert.equal(calls.creates[0].imageInputs[0].localPath, 'C:/new-upload.png');
+  assert.equal(calls.creates[0].imageInputs[0].assetId, '');
+  assert.equal(h.run('project.videoGeneration.items[0].status'), 'success');
+});
+
+test('已保存项目换图后对齐状态可清掉旧认证，其他素材的上传和取消不改动选图', async () => {
+  const h = harness({ selectLocalAssetImages: async () => ({ files: [{ localPath: 'C:/unrelated.png' }] }) });
+  prepareBlockedReferenceProject(h);
+  const pending = h.snapshot('project.videoGeneration.pendingCertification');
+  await h.run('selectLocalAssetImages(2)');
+  assert.deepEqual(h.snapshot('project.videoGeneration.pendingCertification'), pending);
+  h.context.window.storyforgeAI.selectLocalAssetImages = async () => ({ canceled: true });
+  await h.run('selectLocalAssetImages(0)');
+  assert.deepEqual(h.snapshot('project.videoGeneration.pendingCertification'), pending);
+  h.run('project.videoGeneration.items[0].referenceBindings = {"asset:阿宁":{assetName:"阿宁",localPath:"C:/aning-variant.png"}}; alignVideoGenerationItems(project.outputs.storyboard.prompts)');
+  assert.equal(h.run('project.videoGeneration.pendingCertification'), null);
+  assert.equal(h.run('project.videoGeneration.items[0].status'), 'pending');
+});
+
+test('历史认证记录不阻止用户主动重新提交，卡片保留重试和认证两个入口', async () => {
+  const { h, calls } = autoPipelineHarness();
+  prepareBlockedReferenceProject(h);
+  let opened = 0;
+  h.context.openPortraitCertificationModal = () => { opened += 1; };
+  assert.match(h.run('videoGenerationTemplate()'), /data-generate-video-index="0"/);
+  assert.match(h.run('videoGenerationTemplate()'), /data-open-portrait-certification="0"/);
+  await h.run('generateSeedanceVideos({token:++generationRun,mode:"batch"})');
+  assert.equal(calls.creates.length, 1);
+  assert.equal(calls.downloads.length, 1);
+  assert.equal(opened, 0);
+  assert.equal(h.run('project.videoGeneration.pendingCertification'), null);
+});
+
+test('新图被平台再次拦截时只记录本次新图，不自动循环重试或使用旧图认证', async () => {
+  const { h, calls } = autoPipelineHarness();
+  prepareBlockedReferenceProject(h);
+  h.run('selectVideoReference(0,1,0,1)');
+  h.context.window.storyforgeAI.createSeedanceTask = async options => {
+    calls.creates.push(options);
+    throw new Error('input image content[1] may contain a real person');
+  };
+  await h.run('generateSeedanceVideos({token:++generationRun,indexes:[0]})');
+  assert.equal(calls.creates.length, 1);
+  assert.equal(calls.downloads.length, 0);
+  assert.equal(h.run('project.videoGeneration.pendingCertification.blockedInputs[0].localPath'), 'C:/aning-variant.png');
+  assert.equal(h.run('project.videoGeneration.items[0].status'), 'certification');
+});
+
 test('耗时详情默认折叠，进度刷新与页面模板重绘沿用当前展开状态', () => {
   const h = harness();
   assert.match(h.run('workflowProgressTemplate()'), /<details id="workflowProgressDetails">/);
