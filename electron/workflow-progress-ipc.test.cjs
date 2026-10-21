@@ -24,10 +24,10 @@ test('preload exposes payload-only progress, exact unsubscribe and bounded run m
   assert.equal(received[0][0], payload);
   off(); off(); renderer.emit('deepseek:workflow-progress', {}, payload);
   assert.equal(received.length, 1);
-  await bridge.generateWorkflow('原始输入', { runId: 'run-1', projectId: 'project-1', model: 'unexpected' });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), ['deepseek:generate-workflow', '原始输入', { runId: 'run-1', projectId: 'project-1' }]);
+  await bridge.generateWorkflow('原始输入', { runId: 'run-1', projectId: 'project-1', provider: 'codex-subscription', model: 'catalog-model', reasoningEffort: 'low', apiKey: 'must-not-pass' });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), ['deepseek:generate-workflow', '原始输入', { runId: 'run-1', projectId: 'project-1', provider: 'codex-subscription', model: 'catalog-model', reasoningEffort: 'low' }]);
   const stageSkills = { storyboard: { name: '分镜.md', content: '根据场景节拍安排时长。' }, assets: { name: '素材.txt', content: '使用水彩画风。' } };
-  await bridge.generateWorkflow('原文', { stageSkills, model: 'not-allowed' });
+  await bridge.generateWorkflow('原文', { stageSkills, apiKey: 'not-allowed' });
   assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), ['deepseek:generate-workflow', '原文', { stageSkills }]);
   await bridge.importSkillDocument({ stage: 'assets', path: 'C:/unselected.txt' });
   assert.deepEqual(JSON.parse(JSON.stringify(calls[2])), ['skills:import-document', { stage: 'assets' }]);
@@ -44,8 +44,8 @@ function mainHandler() {
   let handler;
   const hooks = {};
   vm.runInNewContext(source.slice(begin, end), {
-    __dirname, path, pathToFileURL, randomUUID: () => 'generated-id',
-    ipcMain: { handle: (_name, callback) => { handler = callback; } },
+    __dirname, path, pathToFileURL, randomUUID: () => 'generated-id', MODEL: 'deepseek-flash', workflowOwners: new Map(),
+    ipcMain: { handle: (name, callback) => { if (name === 'deepseek:generate-workflow') handler = callback; } },
     readStoredKey: () => 'offline-test-key', readSeedanceSettings: () => ({ ratio: '9:16' }),
     callDeepSeek: async () => ({}),
     normalizeStageSkills,

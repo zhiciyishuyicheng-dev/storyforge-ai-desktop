@@ -2,6 +2,7 @@ const number = (value, fallback = 0) => Number.isFinite(value) && value >= 0 ? v
 const optionalNumber = (value) => value === null || value === undefined ? null : number(value, null);
 const timestamp = (value) => Number.isFinite(value) ? value : (Date.parse(value) || 0);
 const text = (value, length = 1000) => typeof value === 'string' ? value.slice(0, length) : '';
+const effort = (value) => ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value) ? value : '';
 
 // Whitelist telemetry fields: source text, generated content, reasoning and credentials never enter project storage.
 export function normalizeWorkflowProgress(value) {
@@ -16,7 +17,9 @@ export function normalizeWorkflowProgress(value) {
     preparationMs: optionalNumber(value.preparationMs),
     prompt: {
       systemChars: number(value.prompt?.systemChars), skillChars: number(value.prompt?.skillChars), inputChars: number(value.prompt?.inputChars),
-      thinkingMode: value.prompt?.thinkingMode === 'enabled' ? 'enabled' : '', reasoningEffort: value.prompt?.reasoningEffort === 'high' ? 'high' : '',
+      provider: value.prompt?.provider === 'codex-subscription' ? 'codex-subscription' : 'deepseek',
+      model: text(value.prompt?.model, 160),
+      thinkingMode: ['enabled', 'disabled'].includes(value.prompt?.thinkingMode) ? value.prompt.thinkingMode : '', reasoningEffort: effort(value.prompt?.reasoningEffort),
     },
     repairCount: number(value.repairCount), maxRepairs: number(value.maxRepairs, 1), localValidationMs: number(value.localValidationMs),
     auditIgnored: value.auditIgnored === true,
@@ -34,9 +37,9 @@ export function normalizeWorkflowProgress(value) {
   };
 }
 
-export function createInitialWorkflowProgress({ runId, projectId, inputChars, now = Date.now() }) {
+export function createInitialWorkflowProgress({ runId, projectId, inputChars, now = Date.now(), provider = 'deepseek', model = 'deepseek-flash', reasoningEffort = 'high' }) {
   return normalizeWorkflowProgress({ schemaVersion: 1, runId, projectId, sequence: 0, status: 'running', phase: 'preparing', startedAt: now, updatedAt: now,
-    elapsedMs: 0, preparationMs: null, prompt: { inputChars, thinkingMode: 'enabled', reasoningEffort: 'high' }, repairCount: 0, maxRepairs: 1, requests: [] });
+    elapsedMs: 0, preparationMs: null, prompt: { inputChars, provider, model, thinkingMode: reasoningEffort === 'none' ? 'disabled' : 'enabled', reasoningEffort }, repairCount: 0, maxRepairs: 1, requests: [] });
 }
 
 export function summarizeWorkflowProgress(value, now = Date.now()) {

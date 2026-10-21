@@ -10,6 +10,16 @@ function clock() {
 }
 const messages = [{ role: 'system', content: '系统提示词' }, { role: 'user', content: '原始输入' }];
 
+test('GPT timing records the selected model and effort instead of the DeepSeek defaults', () => {
+  for (const reasoningEffort of ['none', 'low', 'medium', 'xhigh']) {
+    const timing = createWorkflowTiming({ script: '输入', provider: 'codex-subscription', model: 'catalog-model', reasoningEffort });
+    assert.deepEqual({ ...timing.snapshot().prompt, systemChars: 0, skillChars: 0, inputChars: 0 }, {
+      systemChars: 0, skillChars: 0, inputChars: 0, provider: 'codex-subscription', model: 'catalog-model',
+      reasoningEffort, thinkingMode: reasoningEffort === 'none' ? 'disabled' : 'enabled',
+    });
+  }
+});
+
 test('the Skill character count describes the active uploaded documents without exposing them', () => {
   const timing = createWorkflowTiming({ script: '原始输入', skillChars: 172 });
   assert.equal(timing.snapshot().prompt.skillChars, 172);

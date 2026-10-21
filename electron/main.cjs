@@ -15,6 +15,12 @@ const {
   cancelAll: cancelAllCodexImages,
 } = require('./codex-image.cjs');
 const {
+  getStatus: getCodexTextStatus,
+  createSession: createCodexTextSession,
+  cancel: cancelCodexText,
+  cancelAll: cancelAllCodexText,
+} = require('./codex-text.cjs');
+const {
   DEFAULT_MODEL: SEEDREAM_DEFAULT_MODEL,
   DEFAULT_SIZE: SEEDREAM_DEFAULT_SIZE,
   KNOWN_MODELS: SEEDREAM_MODELS,
@@ -76,6 +82,13 @@ function assertCodexImageSender(event) {
 }
 
 const codexImageOwners = new Map();
+const workflowOwners = new Map();
+
+function cancelWorkflowJob(job) {
+  job.cancelled = true;
+  if (job.provider === 'codex-subscription') cancelCodexText(job.jobId);
+  job.session?.close();
+}
 
 function readStoredKey() {
   try {
@@ -245,24 +258,92 @@ ipcMain.handle('deepseek:generate-workflow', async (event, rawScript, rawRun = {
   const run = rawRun && typeof rawRun === 'object' && !Array.isArray(rawRun) ? rawRun : {};
   for (const key of ['runId', 'projectId']) if (run[key] !== undefined && (typeof run[key] !== 'string' || run[key].length > 128)) throw new Error('生成任务标识无效，请重新开始。');
   if (run.autoRunToVideo !== undefined && typeof run.autoRunToVideo !== 'boolean') throw new Error('全流程自动生成开关无效，请重新设置。');
+  const provider = run.provider === undefined ? 'deepseek' : run.provider;
+  if (!['deepseek', 'codex-subscription'].includes(provider)) throw new Error('分镜生成方式无效，请重新选择。');
+  if (run.model !== undefined && (typeof run.model !== 'string' || (run.model && !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,159}$/.test(run.model)))) throw new Error('分镜模型无效，请重新选择。');
+  if (run.reasoningEffort !== undefined && (typeof run.reasoningEffort !== 'string' || (run.reasoningEffort && !/^[a-z]{1,32}$/.test(run.reasoningEffort)))) throw new Error('思考强度无效，请重新选择。');
   const runId = run.runId || randomUUID();
   const projectId = run.projectId || '';
   const stageSkills = normalizeStageSkills(run.stageSkills);
-  const onProgress = snapshot => {
-    try {
-      if (!sender.isDestroyed() && sender.mainFrame === frame && String(frame.url || '').split(/[?#]/)[0] === expected) frame.send('deepseek:workflow-progress', { ...snapshot, runId, projectId });
-    } catch { /* A closed/navigated renderer cannot consume this task's progress. */ }
-  };
-  const apiKey = readStoredKey();
-  if (!apiKey) throw new Error('尚未配置 DeepSeek API Key。');
   const script = String(rawScript || '').trim();
   if (!script) throw new Error('剧本不能为空。');
-  const generateWorkflow = createWorkflowRunner({
-    request: (messages, options) => callDeepSeek(apiKey, messages, undefined, options.onProgress),
-    onProgress,
+  const ownerKey = `${sender.id}:${runId}`;
+  if (workflowOwners.has(ownerKey)) throw new Error('这个分镜任务正在进行中。');
+  const job = { senderId: sender.id, runId, projectId, provider, jobId: randomUUID(), cancelled: false, session: null };
+  workflowOwners.set(ownerKey, job);
+  const checkCancelled = () => {
+    if (job.cancelled || sender.isDestroyed() || sender.mainFrame !== frame || String(frame.url || '').split(/[?#]/)[0] !== expected) {
+      throw Object.assign(new Error('本次分镜生成已停止。'), { code: 'WORKFLOW_CANCELLED' });
+    }
+  };
+  const onProgress = snapshot => {
+    try {
+      if (!job.cancelled && workflowOwners.get(ownerKey) === job && !sender.isDestroyed() && sender.mainFrame === frame && String(frame.url || '').split(/[?#]/)[0] === expected) frame.send('deepseek:workflow-progress', { ...snapshot, runId, projectId });
+    } catch { /* A closed/navigated renderer cannot consume this task's progress. */ }
+  };
+  try {
+    let request;
+    let model = MODEL;
+    let reasoningEffort = 'high';
+    if (provider === 'codex-subscription') {
+      job.session = await createCodexTextSession({ ...readCodexImageSettings(), jobId: job.jobId, model: run.model, reasoningEffort: run.reasoningEffort });
+      checkCancelled();
+      model = job.session.model;
+      reasoningEffort = job.session.reasoningEffort;
+      request = (messages, options) => job.session.request(messages, options);
+    } else {
+      const apiKey = readStoredKey();
+      if (!apiKey) throw new Error('尚未配置 DeepSeek API Key。');
+      request = (messages, options) => callDeepSeek(apiKey, messages, undefined, options.onProgress);
+    }
+    checkCancelled();
+    const generateWorkflow = createWorkflowRunner({
+      request: async (messages, options) => {
+        checkCancelled();
+        const result = await request(messages, options);
+        checkCancelled();
+        return result;
+      },
+      onProgress, provider, model, reasoningEffort,
+    });
+    const result = await generateWorkflow(script, { ratio: readSeedanceSettings().ratio, stageSkills, ...(run.autoRunToVideo === true ? { videoReady: true } : {}) });
+    checkCancelled();
+    return { ...result, progress: { ...result.progress, runId, projectId } };
+  } finally {
+    job.session?.close();
+    if (workflowOwners.get(ownerKey) === job) workflowOwners.delete(ownerKey);
+  }
+});
+
+ipcMain.handle('deepseek:cancel-workflow', (event, run = {}) => {
+  const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口停止分镜。');
+  if (!run || typeof run.runId !== 'string' || !run.runId || run.runId.length > 128 || typeof run.projectId !== 'string' || run.projectId.length > 128) throw new Error('生成任务标识无效。');
+  const job = workflowOwners.get(`${event.sender.id}:${run.runId}`);
+  if (!job || job.projectId !== run.projectId) return { canceled: false };
+  cancelWorkflowJob(job);
+  return { canceled: true };
+});
+
+ipcMain.handle('codex-text:get-status', async (event) => {
+  const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口检查 GPT 分镜连接。');
+  return getCodexTextStatus(readCodexImageSettings());
+});
+
+ipcMain.handle('codex-text:choose-cli', async (event) => {
+  const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口配置 GPT 分镜。');
+  const selection = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: '选择本机 Codex 程序（codex.exe）', properties: ['openFile'],
+    filters: [{ name: 'Codex 程序', extensions: ['exe'] }],
   });
-  const result = await generateWorkflow(script, { ratio: readSeedanceSettings().ratio, stageSkills, ...(run.autoRunToVideo === true ? { videoReady: true } : {}) });
-  return { ...result, progress: { ...result.progress, runId, projectId } };
+  if (selection.canceled || !selection.filePaths?.length) return { ...(await getCodexTextStatus(readCodexImageSettings())), canceled: true };
+  const cliPath = selection.filePaths[0];
+  if (path.basename(cliPath).toLowerCase() !== 'codex.exe') throw new Error('请选择官方 Codex 程序 codex.exe。');
+  const status = await getCodexTextStatus({ preferredPath: cliPath });
+  if (status.available) fs.writeFileSync(codexImageSettingsPath(), JSON.stringify({ cliPath }, null, 2), 'utf8');
+  return status;
 });
 
 ipcMain.handle('seedream:get-status', () => {
@@ -613,6 +694,9 @@ const createWindow = () => {
     for (const [jobId, senderId] of codexImageOwners) {
       if (senderId === ownerId) cancelCodexImage(jobId);
     }
+    for (const job of workflowOwners.values()) {
+      if (job.senderId === ownerId) cancelWorkflowJob(job);
+    }
   });
 
   win.once('ready-to-show', () => win.show());
@@ -649,4 +733,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => cancelAllCodexImages());
+app.on('before-quit', () => {
+  for (const job of workflowOwners.values()) cancelWorkflowJob(job);
+  cancelAllCodexImages();
+  cancelAllCodexText();
+});

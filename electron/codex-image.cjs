@@ -65,13 +65,14 @@ async function discoverCli(preferredPath) {
 // This transport uses the official app-server protocol and its own managed login.
 // No credential files are opened, copied, or returned to the renderer.
 class AppServer extends EventEmitter {
-  constructor(cliPath, { spawnProcess = spawn, rpcTimeoutMs = RPC_TIMEOUT_MS } = {}) {
+  constructor(cliPath, { spawnProcess = spawn, rpcTimeoutMs = RPC_TIMEOUT_MS, configOverrides = [], interactionMessage } = {}) {
     super();
     this.nextId = 1;
     this.pending = new Map();
     this.closed = false;
     this.failure = null;
     this.rpcTimeoutMs = rpcTimeoutMs;
+    this.interactionMessage = interactionMessage || 'Codex 请求了此生图流程不支持的权限或交互，请在 Codex 中检查登录与管理员设置。';
     this.decoder = new StringDecoder('utf8');
     this.buffer = '';
     const environment = { ...process.env };
@@ -80,6 +81,7 @@ class AppServer extends EventEmitter {
     this.child = spawnProcess(cliPath, [
       '-c', 'model_provider="openai"',
       '-c', 'forced_login_method="chatgpt"',
+      ...configOverrides.flatMap(value => ['-c', value]),
       'app-server',
     ], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], cwd: os.tmpdir(), env: environment });
     this.child.stdout.on('data', chunk => this.onData(chunk));
@@ -126,10 +128,10 @@ class AppServer extends EventEmitter {
         } else if (Object.prototype.hasOwnProperty.call(message, 'result')) pending.resolve(message.result);
         else pending.reject(userError('Codex 返回了不完整的响应。', 'CODEX_PROTOCOL_ERROR'));
       } else if (message.method && message.id !== undefined) {
-        // Never approve requests or provide tokens. An image-only job must not
+        // Never approve requests or provide tokens. A managed generation job must not
         // silently grant command/file/network permissions or external login.
-        try { this.write({ id: message.id, error: { code: -32601, message: 'StoryForge supports built-in image generation only.' } }); } catch {}
-        this.fail(userError('Codex 请求了此生图流程不支持的权限或交互，请在 Codex 中检查登录与管理员设置。', 'CODEX_INTERACTION_REQUIRED'));
+        try { this.write({ id: message.id, error: { code: -32601, message: 'StoryForge does not allow permission or interactive requests.' } }); } catch {}
+        this.fail(userError(this.interactionMessage, 'CODEX_INTERACTION_REQUIRED'));
       } else if (message.method) {
         this.emit('notification', message.method, message.params || {});
       }
@@ -469,6 +471,6 @@ function createGenerateAndSave({ resolveCli = discoverCli, createClient = cliPat
 const generateAndSave = createGenerateAndSave();
 
 module.exports = {
-  MODEL, getStatus, generateAndSave, cancel, cancelAll,
+  MODEL, getStatus, generateAndSave, cancel, cancelAll, AppServer, discoverCli,
   _test: { AppServer, readAccountStatus, safeSegment, discoverCli, waitForImageTurn, detectImageFormat, saveVersionedImage, createGenerateAndSave },
 };

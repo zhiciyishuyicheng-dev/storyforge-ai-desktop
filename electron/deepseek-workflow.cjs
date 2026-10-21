@@ -18,8 +18,9 @@ function issueText(errors) {
 
 // Audit failures may be explicitly ignored after the one user-authorized repair.
 // Local content checks also become warnings; only unusable data stays blocked.
-function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1, onProgress = () => {}, now = Date.now } = {}) {
-  if (typeof request !== 'function') throw new TypeError('DeepSeek request is required');
+function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1, onProgress = () => {}, now = Date.now,
+  provider = 'deepseek', model = 'deepseek-flash', reasoningEffort = 'high' } = {}) {
+  if (typeof request !== 'function') throw new TypeError('Workflow request is required');
   if (!Number.isInteger(maxRepairs) || maxRepairs < 0 || maxRepairs > 1) throw new TypeError('maxRepairs must be 0 or 1');
 
   return async function generateWorkflow(script, options = {}) {
@@ -27,7 +28,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
     const context = normalizeContext(options);
     const originalScript = script;
     const records = [];
-    const timing = createWorkflowTiming({ script, onProgress, now, maxRepairs,
+    const timing = createWorkflowTiming({ script, onProgress, now, maxRepairs, provider, model, reasoningEffort,
       skillChars: (context.stageSkills.storyboard?.content.length ?? SKILL_TEXT.length) + (context.stageSkills.assets?.content.length || 0) });
     const publishCandidate = (data, audit, auditSummary, repairCount, auditIgnored = false) => {
       data.storyboard.skillVersion = VERSION;
@@ -39,6 +40,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
         builtinSkillApplied: !context.stageSkills.storyboard,
         auditBasis: context.stageSkills.storyboard ? '用户 Skill' : '内置 Skill',
         stageSkills: stageSkillReferences(context.stageSkills),
+        generation: { provider, model: records.at(-1)?.model || model, reasoningEffort },
         inputSha256: createHash('sha256').update(originalScript).digest('hex'),
         repairCount, requestCount: records.length, scope: auditSummary.scope || '文本与计划',
         auditIgnored, auditPassed: !auditIgnored, auditStatus: auditSummary.finalStatus,
@@ -51,7 +53,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
         total_tokens: usageRecords.reduce((sum, record) => sum + (Number(record.usage.total_tokens) || 0), 0),
       } : null;
       const progress = timing.complete({ auditIgnored });
-      return { data, usage, model: records.at(-1)?.model || 'deepseek-flash', progress };
+      return { data, usage, provider, reasoningEffort, model: records.at(-1)?.model || model, progress };
     };
     const invoke = async (buildMessages, phase, repairCount) => {
       const preparationStarted = timing.prepare();
@@ -60,9 +62,9 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
       const id = timing.beginRequest(phase, repairCount, messages);
       try {
         const result = await request(messages, { phase, onProgress: event => timing.updateRequest(id, event) });
-        if (!result || typeof result !== 'object') throw workflowError('DeepSeek 返回了无效响应，未交付候选分镜。', 'INVALID_MODEL_RESPONSE');
+        if (!result || typeof result !== 'object') throw workflowError('模型返回了无效响应，未交付候选分镜。', 'INVALID_MODEL_RESPONSE');
         timing.endRequest(id, result.timing);
-        records.push({ phase, usage: result.usage || null, model: result.model || 'deepseek-flash' });
+        records.push({ phase, usage: result.usage || null, model: result.model || model });
         return result;
       } catch (error) { timing.endRequest(id, error.timing, error); throw error; }
     };

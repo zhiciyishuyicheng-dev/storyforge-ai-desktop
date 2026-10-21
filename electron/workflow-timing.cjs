@@ -2,12 +2,14 @@ const { SKILL_TEXT } = require('./storyboard-skill.cjs');
 
 const STATS = ['elapsedMs', 'firstResponseMs', 'firstReasoningMs', 'firstContentMs', 'waitingMs', 'thinkingMs', 'outputMs', 'reasoningChars', 'outputChars', 'streamed', 'requestId', 'lastPhase'];
 
-function createWorkflowTiming({ script, onProgress = () => {}, now = Date.now, maxRepairs = 1, skillChars = SKILL_TEXT.length }) {
+function createWorkflowTiming({ script, onProgress = () => {}, now = Date.now, maxRepairs = 1, skillChars = SKILL_TEXT.length,
+  provider = 'deepseek', model = 'deepseek-flash', reasoningEffort = 'high' }) {
   const startedAt = now();
   const state = {
     schemaVersion: 1, sequence: 0, status: 'running', phase: 'preparing',
     startedAt, updatedAt: startedAt, elapsedMs: 0, preparationMs: 0,
-    prompt: { systemChars: 0, skillChars: Number.isSafeInteger(skillChars) && skillChars >= 0 ? skillChars : SKILL_TEXT.length, inputChars: script.length, thinkingMode: 'enabled', reasoningEffort: 'high' },
+    prompt: { systemChars: 0, skillChars: Number.isSafeInteger(skillChars) && skillChars >= 0 ? skillChars : SKILL_TEXT.length, inputChars: script.length,
+      provider, model, thinkingMode: reasoningEffort === 'none' ? 'disabled' : 'enabled', reasoningEffort },
     repairCount: 0, maxRepairs, localValidationMs: 0, requests: [],
   };
   function publish() {

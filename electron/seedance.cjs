@@ -1,6 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { randomUUID } = require('node:crypto');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const { safeSegment } = require('./seedream.cjs');
 
 const API_BASE = 'https://ark.cn-beijing.volces.com/api/v3';
@@ -180,18 +183,49 @@ async function downloadAndSave({ videoUrl, outputRoot, projectTitle, projectId, 
     '视频片段',
   );
   fs.mkdirSync(directory, { recursive: true });
-  const savedName = normalizeVideoFileName(fileName, index);
-  const targetPath = path.join(directory, savedName);
+  const requestedName = normalizeVideoFileName(fileName, index);
+  const temporary = path.join(directory, `.storyforge-video-${randomUUID()}.tmp`);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000);
-  let response;
-  try { response = await fetch(url, { signal: controller.signal }); }
+  let targetPath;
+  let savedName;
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`下载 Seedance 视频失败（${response.status}）。`);
+    if (response.body) {
+      const input = typeof response.body.getReader === 'function' ? Readable.fromWeb(response.body) : response.body;
+      await pipeline(input, fs.createWriteStream(temporary, { flags: 'wx' }), { signal: controller.signal });
+    } else {
+      // Support providers/mocks that expose a body only as an ArrayBuffer.
+      await fs.promises.writeFile(temporary, Buffer.from(await response.arrayBuffer()), { flag: 'wx', signal: controller.signal });
+    }
+    const stat = await fs.promises.stat(temporary);
+    if (!stat.size) throw new Error('Seedance 返回了空视频，请重试。');
+    const base = requestedName.slice(0, -4);
+    let version = 1;
+    // Exclusive reservations make simultaneous completions choose different
+    // names. Publish only a complete download; historical files are never opened
+    // for writing or overwritten by a later generation.
+    while (true) {
+      savedName = version === 1 ? requestedName : `${base}-v${version}.mp4`;
+      targetPath = path.join(directory, savedName);
+      let reservation;
+      try { reservation = await fs.promises.open(targetPath, 'wx'); }
+      catch (error) { if (error.code === 'EEXIST') { version += 1; continue; } throw error; }
+      await reservation.close();
+      try { await fs.promises.rename(temporary, targetPath); }
+      catch (error) { await fs.promises.unlink(targetPath).catch(() => {}); throw error; }
+      break;
+    }
+  }
   catch (error) {
     if (error?.name === 'AbortError') throw new Error('下载 Seedance 视频超时，请重试。');
+    if (/^下载 Seedance 视频失败|空视频/.test(error?.message || '')) throw error;
     throw new Error(`下载 Seedance 视频失败：${error?.message || '网络请求失败'}`);
-  } finally { clearTimeout(timeout); }
-  if (!response.ok) throw new Error(`下载 Seedance 视频失败（${response.status}）。`);
-  fs.writeFileSync(targetPath, Buffer.from(await response.arrayBuffer()));
+  } finally {
+    clearTimeout(timeout);
+    await fs.promises.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }
   return {
     localPath: targetPath,
     videoFileUrl: pathToFileURL(targetPath).href,

@@ -16,6 +16,19 @@ function progress(overrides = {}) {
   };
 }
 
+test('GPT 进度持久保留本次选定模型和强度，禁用思考时不显示已启用', () => {
+  for (const reasoningEffort of ['none', 'low', 'medium', 'xhigh']) {
+    const initial = createInitialWorkflowProgress({ runId: 'r', projectId: 'p', inputChars: 5,
+      provider: 'codex-subscription', model: 'catalog-model', reasoningEffort });
+    const restored = normalizeWorkflowProgress(JSON.parse(JSON.stringify(initial)));
+    assert.equal(restored.prompt.provider, 'codex-subscription');
+    assert.equal(restored.prompt.model, 'catalog-model');
+    assert.equal(restored.prompt.reasoningEffort, reasoningEffort);
+    assert.equal(restored.prompt.thinkingMode, reasoningEffort === 'none' ? 'disabled' : 'enabled');
+  }
+  assert.equal(normalizeWorkflowProgress(progress({ prompt: { reasoningEffort: 'untrusted content' } })).prompt.reasoningEffort, '');
+});
+
 test('按请求归类统计，思考是包含关系且运行时按最新快照继续计时', () => {
   const value = summarizeWorkflowProgress(progress(), 11000);
   assert.equal(value.elapsedMs, 10000);
