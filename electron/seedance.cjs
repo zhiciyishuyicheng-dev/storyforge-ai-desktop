@@ -172,9 +172,9 @@ function normalizeVideoFileName(value, index = 0) {
   return `${safeSegment(base, `镜头-${String(index + 1).padStart(2, '0')}`)}.mp4`;
 }
 
-async function downloadAndSave({ videoUrl, outputRoot, projectTitle, projectId, fileName, index }) {
+async function downloadAndSave({ videoUrl, outputRoot, projectTitle, projectId, fileName, index, providerName = 'Seedance', requestHeaders = {}, allowHttp = false }) {
   const url = String(videoUrl || '').trim();
-  if (!/^https:\/\//i.test(url)) throw new Error('Seedance 没有返回可下载的视频地址。');
+  if (!(allowHttp ? /^https?:\/\//i : /^https:\/\//i).test(url)) throw new Error(`${providerName} 没有返回可下载的视频地址。`);
   const directory = path.join(
     outputRoot,
     'StoryForge',
@@ -190,8 +190,9 @@ async function downloadAndSave({ videoUrl, outputRoot, projectTitle, projectId, 
   let targetPath;
   let savedName;
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`下载 Seedance 视频失败（${response.status}）。`);
+    const response = await fetch(url, { signal: controller.signal, headers: requestHeaders, ...(allowHttp ? { redirect: 'error' } : {}) });
+    if (!response.ok) throw new Error(`下载 ${providerName} 视频失败（${response.status}）。`);
+    if (/text\/html/i.test(response.headers?.get?.('content-type') || '')) throw new Error('视频下载返回了登录页面，请检查 ComfyUI 访问密钥。');
     if (response.body) {
       const input = typeof response.body.getReader === 'function' ? Readable.fromWeb(response.body) : response.body;
       await pipeline(input, fs.createWriteStream(temporary, { flags: 'wx' }), { signal: controller.signal });
@@ -200,7 +201,7 @@ async function downloadAndSave({ videoUrl, outputRoot, projectTitle, projectId, 
       await fs.promises.writeFile(temporary, Buffer.from(await response.arrayBuffer()), { flag: 'wx', signal: controller.signal });
     }
     const stat = await fs.promises.stat(temporary);
-    if (!stat.size) throw new Error('Seedance 返回了空视频，请重试。');
+    if (!stat.size) throw new Error(`${providerName} 返回了空视频，请重试。`);
     const base = requestedName.slice(0, -4);
     let version = 1;
     // Exclusive reservations make simultaneous completions choose different
@@ -219,9 +220,9 @@ async function downloadAndSave({ videoUrl, outputRoot, projectTitle, projectId, 
     }
   }
   catch (error) {
-    if (error?.name === 'AbortError') throw new Error('下载 Seedance 视频超时，请重试。');
+    if (error?.name === 'AbortError') throw new Error(`下载 ${providerName} 视频超时，请重试。`);
     if (/^下载 Seedance 视频失败|空视频/.test(error?.message || '')) throw error;
-    throw new Error(`下载 Seedance 视频失败：${error?.message || '网络请求失败'}`);
+    throw new Error(`下载 ${providerName} 视频失败：${error?.message || '网络请求失败'}`);
   } finally {
     clearTimeout(timeout);
     await fs.promises.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });

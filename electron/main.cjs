@@ -55,6 +55,12 @@ const {
 const SEEDANCE_DEFAULT_GENERATION_MODE = 'batch';
 const SEEDANCE_GENERATION_MODES = ['batch', 'confirm'];
 
+require('./comfy-video-ipc.cjs').registerComfyVideo({
+  ipcMain, app, safeStorage,
+  assertSender: assertCodexImageSender,
+  assertImagePath: (rawPath) => assertStoryForgePath(rawPath, '参考图'),
+});
+
 const MODEL = 'deepseek-flash';
 // 视觉素材停用付费 API 生图，使用本机 Codex 的 ChatGPT 订阅或本地上传。
 const IMAGE_MODEL_GENERATION_ENABLED = false;

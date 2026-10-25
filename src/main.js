@@ -1,4 +1,6 @@
 import './style.css';
+import { buildH3ReferenceRequest } from './h3-references.js';
+import { comfyVideoSettingsTemplate, readComfyVideoSettings } from './comfy-video-ui.js';
 import { normalizeSeedanceDuration, resolveSeedanceDuration, resolveStoryboardDuration } from './seedance-duration.js';
 import { normalizeSeedanceGenerationMode, selectSeedanceGenerationIndexes } from './seedance-generation.js';
 import { buildSeedanceReferenceRequest, ensureStoryboardShot, extractAssetReferences, migrateNamedReferencePlan, namedReferenceKey, resolveStrictReferencePlan } from './seedance-references.js';
@@ -49,7 +51,7 @@ const steps = [
   { id: 'analysis', no: '01', label: '故事分析', icon: '⌘', sub: '主线与人物' },
   { id: 'storyboard', no: '02', label: '分镜脚本', icon: '▦', sub: '镜头与动作' },
   { id: 'assets', no: '03', label: '视觉素材', icon: '✦', sub: '角色与场景' },
-  { id: 'video', no: '04', label: '视频生成', icon: '▶', sub: 'Seedance 镜头' },
+  { id: 'video', no: '04', label: '视频生成', icon: '▶', sub: '分镜视频' },
 ];
 
 const demoScript = `第1集 失控的婚礼\n\n苏晚在婚礼现场等了两个小时，新郎陆沉却迟迟没有出现。所有人都在窃窃私语，只有她知道，陆沉昨晚发来的最后一条消息是：别相信你身边的人。\n\n就在她准备独自完成仪式时，大门被推开。一个和陆沉长得一模一样的男人走了进来。他当众叫出了她只有在梦里听过的小名。\n\n苏晚：你到底是谁？\n男人：我来接你回家。\n\n灯光熄灭，宾客的手机同时收到一张照片——照片里，苏晚已经死了三年。`;
@@ -88,6 +90,7 @@ let openAIImageStatus = { configured: false, model: OPENAI_IMAGE_MODEL, size: OP
 let seedanceStatus = { configured: false, model: SEEDANCE_DEFAULT_MODEL, ratio: SEEDANCE_DEFAULT_RATIO, resolution: SEEDANCE_DEFAULT_RESOLUTION, duration: SEEDANCE_DEFAULT_DURATION, generationMode: SEEDANCE_DEFAULT_GENERATION_MODE, generateAudio: true, models: SEEDANCE_MODELS, ratios: SEEDANCE_RATIOS, resolutions: SEEDANCE_RESOLUTIONS, durations: SEEDANCE_DURATIONS, checking: true };
 let imageProvider = loadImageProvider();
 let imageProviderDraft = imageProvider;
+let comfyVideoStatus = { configured: false, baseUrl: '', tokenConfigured: false, model: '', clipModel: '', videoVae: '', audioVae: '', ratio: '16:9', resolution: '480p', duration: 5, steps: 20, generationMode: 'confirm', generateAudio: true };
 let seedanceGenerationModeDraft = SEEDANCE_DEFAULT_GENERATION_MODE;
 let customAssetTargetShotIndex = null;
 let codexImageStatus = { available: false, authenticated: false, imageGeneration: false, model: OPENAI_IMAGE_MODEL, checking: true };
@@ -238,8 +241,9 @@ function normalizeProject(saved) {
     items: Array.isArray(saved?.videoGeneration?.items) ? saved.videoGeneration.items.map((savedItem) => {
       const item = normalizeVideoItemVersions(savedItem);
       if (['creating', 'queued', 'running', 'downloading'].includes(item.status)) {
-        item.status = getSelectedVideoVersion(item) ? 'success' : 'pending';
-        item.taskId = '';
+        const resumable = item.taskProvider === 'comfy' && item.taskId;
+        item.status = resumable ? 'pending' : getSelectedVideoVersion(item) ? 'success' : 'pending';
+        if (!resumable) item.taskId = '';
       }
       return item;
     }) : [],
@@ -377,9 +381,13 @@ function imageQualityLabel(value) {
   return OPENAI_IMAGE_QUALITIES.find((item) => item.id === value)?.label || value;
 }
 
-function seedanceModelLabel(modelId = seedanceStatus.model) {
+function seedanceModelLabel(modelId = currentVideoSettings().model) {
+  if (/ref2va/i.test(modelId) || (activeVideoProvider() === 'comfy' && !modelId)) return 'MiniMax H3 · Ref2VA';
   return SEEDANCE_MODELS.find((item) => item.id === modelId)?.label || 'Seedance 2.0';
 }
+
+function activeVideoProvider() { return project.videoGeneration?.provider === 'comfy' ? 'comfy' : 'seedance'; }
+function currentVideoSettings() { return activeVideoProvider() === 'comfy' ? comfyVideoStatus : seedanceStatus; }
 
 function currentIndex() { return steps.findIndex((step) => step.id === project.activeStep); }
 
@@ -799,20 +807,20 @@ function appTemplate() {
         <div class="sidebar-bottom">
           <button class="account" id="openSettings"><div class="avatar">${project.storyboardGeneration?.provider === 'codex-subscription' ? 'G' : '深'}</div><div><b>${esc(storyboardProviderLabel())}</b><small>${esc(storyboardConnectionText())}</small></div><span class="settings">⚙</span></button>
           <button class="account seedream-account" id="openCodexImageSettings"><div class="avatar seedream-avatar">图</div><div><b>GPT 订阅生图</b><small data-codex-image-status>${esc(codexImageStatusText())}</small></div><span class="settings">⚙</span></button>
-          <button class="account seedance-account" id="openSeedanceSettings"><div class="avatar seedance-video-avatar">视</div><div><b>${esc(videoModelName)}</b><small>${seedanceStatus.configured ? `${esc(seedanceStatus.ratio)} · ${esc(seedanceStatus.resolution)} · ${seedanceStatus.generationMode === 'confirm' ? '逐镜确认' : '批量连续'}` : '需要配置火山方舟 API Key'}</small></div><span class="settings">⚙</span></button>
+          <button class="account seedance-account" id="openSeedanceSettings"><div class="avatar seedance-video-avatar">视</div><div><b>${esc(videoModelName)}</b><small>${currentVideoSettings().configured ? `${esc(currentVideoSettings().ratio)} · ${esc(currentVideoSettings().resolution)} · ${currentVideoSettings().generationMode === 'confirm' ? '逐镜确认' : '批量连续'}` : (activeVideoProvider() === 'comfy' ? '需要配置 ComfyUI 地址' : '需要配置火山方舟 API Key')}</small></div><span class="settings">⚙</span></button>
         </div>
       </aside>
       <main class="main">
         <header class="topbar"><div class="breadcrumbs"><span>工作台</span><i>/</i><b>${esc(project.title)}</b></div><div class="top-actions"><span class="saved"><span class="saved-dot"></span> 已自动保存</span><button class="icon-button" title="字体缩放：Ctrl + / Ctrl - / Ctrl 0">A</button><button class="transfer-button" id="importProject">导入项目</button><button class="export-button" id="exportProject">导出项目 <span>↓</span></button><input type="file" id="projectFileInput" accept=".json,application/json" hidden /></div></header>
-        <section class="hero"><div><div class="eyebrow">AI STORYTELLING STUDIO</div><h1>让想象，成为可见的世界。</h1><p>从文字出发，让角色走进画面，让故事拥有声音与生命。</p></div><div class="hero-meta"><button class="status-pill model-status ${isStoryboardProviderReady() ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${esc(storyboardConnectionText())}</button><button class="status-pill model-status ${isCodexImageReady() ? 'connected' : 'disconnected'}" id="heroCodexImageStatus"><i></i> <span data-codex-image-status>${esc(codexImageStatusText())}</span></button><button class="status-pill model-status ${seedanceStatus.configured ? 'connected' : 'disconnected'}" id="heroSeedanceStatus"><i></i> ${seedanceStatus.checking ? '正在检查视频模型' : seedanceStatus.configured ? `${esc(videoModelName)} 已连接` : '配置 Seedance'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
+        <section class="hero"><div><div class="eyebrow">AI STORYTELLING STUDIO</div><h1>让想象，成为可见的世界。</h1><p>从文字出发，让角色走进画面，让故事拥有声音与生命。</p></div><div class="hero-meta"><button class="status-pill model-status ${isStoryboardProviderReady() ? 'connected' : 'disconnected'}" id="heroModelStatus"><i></i> ${esc(storyboardConnectionText())}</button><button class="status-pill model-status ${isCodexImageReady() ? 'connected' : 'disconnected'}" id="heroCodexImageStatus"><i></i> <span data-codex-image-status>${esc(codexImageStatusText())}</span></button><button class="status-pill model-status ${currentVideoSettings().configured ? 'connected' : 'disconnected'}" id="heroSeedanceStatus"><i></i> ${currentVideoSettings().checking ? '正在检查视频模型' : currentVideoSettings().configured ? `${esc(videoModelName)} 已配置` : '配置视频服务'}</button><span class="updated">${project.updatedAt ? '本机已保存' : '等待输入'}</span></div></section>
         <section class="output-card card"><div class="card-head output-head"><div><span class="section-kicker">OUTPUT</span><h2>生成结果</h2></div><div class="output-tools"><button class="small-button" id="clearOutput">清空当前步骤</button><button class="small-button" id="copyOutput">复制当前结果</button></div></div>${storyboardGenerationTemplate()}${generationSkillTemplate()}<div id="outputArea">${outputTemplate()}</div></section>
         <section class="workflow-progress-panel${project.activeStep === 'video' ? ' video-progress-panel' : ''}" id="workflowProgressPanel" aria-label="${project.activeStep === 'video' ? '视频分镜进度' : '分镜执行进度'}">${generationProgressTemplate()}</section>
       </main>
       <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4.1 Flash</b><small>选择 DeepSeek 方式时，用于故事分析、分镜和视觉素材提示词；也可在结果区上方切换 GPT 订阅。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
       <div class="modal-backdrop" id="imageSettingsModal" hidden><div class="settings-modal image-settings-modal"><div class="modal-head"><div><span class="section-kicker">IMAGE MODEL SETTINGS</span><h2>第三步生图设置</h2></div><button id="closeImageSettings">×</button></div><div class="image-provider-switch" role="tablist" aria-label="生图渠道"><button class="${imageProviderDraft === 'seedream' ? 'active' : ''}" data-image-provider="seedream" role="tab" aria-selected="${imageProviderDraft === 'seedream'}">Seedream 5.0</button><button class="${imageProviderDraft === 'openai' ? 'active' : ''}" data-image-provider="openai" role="tab" aria-selected="${imageProviderDraft === 'openai'}">GPT Image 2</button></div><div class="provider-panel" data-provider-panel="seedream" ${imageProviderDraft === 'seedream' ? '' : 'hidden'}><div class="model-lock seedream-lock"><span>火山方舟生图</span><b>Seedream 5.0</b><small>逐张生成角色、场景和道具参考图，并保存到“文档/StoryForge/项目名/项目编号/视觉素材”。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedreamKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedreamStatus.configured ? '密钥已加密保存；留空可只修改模型和尺寸。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>图片模型</span><select id="seedreamModel">${SEEDREAM_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedreamStatus.model ? 'selected' : ''}>${item.label}${item.pricePerImage ? ` · ¥${item.pricePerImage.toFixed(2)}/张` : ' · 需账号单独开通'}</option>`).join('')}</select><small>正式版和 Lite 都需要在火山方舟单独开通。</small></label><label class="key-field"><span>输出尺寸</span><select id="seedreamSize"><option value="2K" ${seedreamStatus.size === '2K' ? 'selected' : ''}>2K（推荐）</option><option value="4K" ${seedreamStatus.size === '4K' ? 'selected' : ''}>4K</option></select></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedream 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div></div><div class="provider-panel" data-provider-panel="openai" ${imageProviderDraft === 'openai' ? '' : 'hidden'}><div class="model-lock openai-image-lock"><span>OpenAI 生图</span><b>GPT Image 2</b><small>按参考图提示词生成 PNG 图片。复杂提示词最多可能需要约两分钟。</small></div><label class="key-field"><span>OpenAI API Key</span><input id="openAIImageKey" type="password" placeholder="sk-..." autocomplete="off"><small>${openAIImageStatus.configured ? '密钥已加密保存；留空可只修改尺寸和质量。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>输出尺寸</span><select id="openAIImageSize">${OPENAI_IMAGE_SIZES.map((item) => `<option value="${item.id}" ${item.id === openAIImageStatus.size ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>图片质量</span><select id="openAIImageQuality">${OPENAI_IMAGE_QUALITIES.map((item) => `<option value="${item.id}" ${item.id === openAIImageStatus.quality ? 'selected' : ''}>${item.label}</option>`).join('')}</select><small>高质量耗时和费用更高；费用以 OpenAI 控制台为准。</small></label><div class="key-links"><a class="key-help" href="https://platform.openai.com/api-keys" target="_blank">创建 OpenAI API Key ↗</a><a class="key-help" href="https://platform.openai.com/settings/organization/general" target="_blank">组织与验证设置 ↗</a></div></div><div class="modal-message" id="imageMessage"></div><div class="modal-actions"><button class="outline-button" id="testImageProvider">测试连接（不生图）</button><button class="primary-button" id="saveImageProvider">保存并使用</button></div></div></div>
-      <div class="modal-backdrop" id="seedanceSettingsModal" hidden><div class="settings-modal seedance-settings-modal"><div class="modal-head"><div><span class="section-kicker">VIDEO MODEL SETTINGS</span><h2>第四步视频设置</h2></div><button id="closeSeedanceSettings">×</button></div><div class="model-lock seedance-video-lock"><span>火山方舟视频生成</span><b>Seedance 2.0</b><small>每个镜头使用第二步分镜中的时长，生成 4 至 15 秒视频；按 @人物名、@场景名、@道具名自动匹配第三步同名图片。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedanceKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedanceStatus.configured ? (seedanceStatus.inheritedKey ? '当前复用 Seedream 的火山方舟密钥；留空即可继续使用。' : '密钥已加密保存；留空可只修改视频参数。') : '可复用 Seedream 的同一个火山方舟 API Key。'}</small></label><div class="seedance-setting-grid"><label class="key-field"><span>视频模型</span><select id="seedanceModel">${SEEDANCE_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedanceStatus.model ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>画面比例</span><select id="seedanceRatio">${SEEDANCE_RATIOS.map((item) => `<option value="${item}" ${item === seedanceStatus.ratio ? 'selected' : ''}>${item}${item === '9:16' ? '（竖屏推荐）' : ''}</option>`).join('')}</select></label><label class="key-field"><span>分辨率</span><select id="seedanceResolution">${SEEDANCE_RESOLUTIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.resolution ? 'selected' : ''}>${item}</option>`).join('')}</select></label><label class="key-field"><span>缺省时长</span><select id="seedanceDuration">${SEEDANCE_DURATIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.duration ? 'selected' : ''}>${item} 秒</option>`).join('')}</select><small>仅在分镜没有有效时长时使用。</small></label></div><div class="video-generation-mode-field"><span>生成方式</span><div class="video-generation-mode" role="tablist" aria-label="视频生成方式"><button class="${seedanceStatus.generationMode === 'confirm' ? '' : 'active'}" data-seedance-generation-mode="batch" role="tab" aria-selected="${seedanceStatus.generationMode !== 'confirm'}"><b>批量连续</b><small>一次确认，按顺序生成全部镜头</small></button><button class="${seedanceStatus.generationMode === 'confirm' ? 'active' : ''}" data-seedance-generation-mode="confirm" role="tab" aria-selected="${seedanceStatus.generationMode === 'confirm'}"><b>逐镜确认</b><small>每个镜头完成后暂停，确认后再生成下一个</small></button></div></div><label class="toggle-field"><input id="seedanceGenerateAudio" type="checkbox" ${seedanceStatus.generateAudio ? 'checked' : ''}><span><b>生成同步音频</b><small>让 Seedance 同时生成对白、人声、环境音和配乐。</small></span></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedance 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div><div class="modal-message" id="seedanceMessage"></div><div class="modal-actions"><button class="outline-button" id="testSeedance">测试连接（不生视频）</button><button class="primary-button" id="saveSeedance">保存设置</button></div></div></div>
+      <div class="modal-backdrop" id="seedanceSettingsModal" hidden><div class="settings-modal seedance-settings-modal"><div class="modal-head"><div><span class="section-kicker">VIDEO MODEL SETTINGS</span><h2>第四步视频设置</h2></div><button id="closeSeedanceSettings">×</button></div><label class="key-field"><span>视频生成服务</span><select id="seedanceVideoProvider"><option value="seedance">火山方舟 · Seedance 2.0</option><option value="comfy">仙宫云 GPU · H3 Ref2VA</option></select></label><div class="model-lock seedance-video-lock"><span>火山方舟视频生成</span><b>Seedance 2.0</b><small>每个镜头使用第二步分镜中的时长，生成 4 至 15 秒视频；按 @人物名、@场景名、@道具名自动匹配第三步同名图片。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedanceKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedanceStatus.configured ? (seedanceStatus.inheritedKey ? '当前复用 Seedream 的火山方舟密钥；留空即可继续使用。' : '密钥已加密保存；留空可只修改视频参数。') : '可复用 Seedream 的同一个火山方舟 API Key。'}</small></label><div class="seedance-setting-grid"><label class="key-field"><span>视频模型</span><select id="seedanceModel">${SEEDANCE_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedanceStatus.model ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>画面比例</span><select id="seedanceRatio">${SEEDANCE_RATIOS.map((item) => `<option value="${item}" ${item === seedanceStatus.ratio ? 'selected' : ''}>${item}${item === '9:16' ? '（竖屏推荐）' : ''}</option>`).join('')}</select></label><label class="key-field"><span>分辨率</span><select id="seedanceResolution">${SEEDANCE_RESOLUTIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.resolution ? 'selected' : ''}>${item}</option>`).join('')}</select></label><label class="key-field"><span>缺省时长</span><select id="seedanceDuration">${SEEDANCE_DURATIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.duration ? 'selected' : ''}>${item} 秒</option>`).join('')}</select><small>仅在分镜没有有效时长时使用。</small></label></div><div class="video-generation-mode-field"><span>生成方式</span><div class="video-generation-mode" role="tablist" aria-label="视频生成方式"><button class="${seedanceStatus.generationMode === 'confirm' ? '' : 'active'}" data-seedance-generation-mode="batch" role="tab" aria-selected="${seedanceStatus.generationMode !== 'confirm'}"><b>批量连续</b><small>一次确认，按顺序生成全部镜头</small></button><button class="${seedanceStatus.generationMode === 'confirm' ? 'active' : ''}" data-seedance-generation-mode="confirm" role="tab" aria-selected="${seedanceStatus.generationMode === 'confirm'}"><b>逐镜确认</b><small>每个镜头完成后暂停，确认后再生成下一个</small></button></div></div><label class="toggle-field"><input id="seedanceGenerateAudio" type="checkbox" ${seedanceStatus.generateAudio ? 'checked' : ''}><span><b>生成同步音频</b><small>让 Seedance 同时生成对白、人声、环境音和配乐。</small></span></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedance 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div><div class="modal-message" id="seedanceMessage"></div><div class="modal-actions"><button class="outline-button" id="testSeedance">测试连接（不生视频）</button><button class="primary-button" id="saveSeedance">保存设置</button></div></div></div>
       <div class="modal-backdrop" id="customAssetModal" hidden><div class="settings-modal custom-asset-modal"><div class="modal-head"><div><span class="section-kicker">CUSTOM REFERENCE</span><h2>${Number.isInteger(customAssetTargetShotIndex) ? `为镜头 ${String(customAssetTargetShotIndex + 1).padStart(2, '0')} 添加参考图` : '添加遗漏资源'}</h2></div><button id="closeCustomAsset">×</button></div><div class="model-lock local-custom-lock"><span>${Number.isInteger(customAssetTargetShotIndex) ? '第四步镜头素材' : '第三步本地素材'}</span><b>创建自定义上传项</b><small>${Number.isInteger(customAssetTargetShotIndex) ? '填写名称并选择图片后，会以 @素材名称添加到当前镜头并自动绑定。' : '适合补充主持人、医生、秘书、额外场景或遗漏道具。创建后立即选择本地参考图片。'}</small></div><label class="key-field"><span>资源名称</span><input id="customAssetName" type="text" placeholder="例如：主持人" autocomplete="off"></label><label class="key-field"><span>资源类型</span><select id="customAssetType"><option value="人物参考图">人物</option><option value="场景参考图">场景</option><option value="群像参考图">群像</option><option value="道具参考图">道具</option><option value="其他参考图">其他</option></select></label><div class="modal-message" id="customAssetMessage"></div><div class="modal-actions"><button class="outline-button" id="cancelCustomAsset">取消</button><button class="primary-button" id="createCustomAsset">创建并上传图片</button></div></div></div>
-      ${portraitCertificationModalTemplate()}
+      ${comfyVideoSettingsTemplate(comfyVideoStatus)}${portraitCertificationModalTemplate()}
       ${codexImageSettingsTemplate()}${codexTextSettingsTemplate()}
       ${generationSkillPreviewTemplate()}
       ${clearResultDialogTemplate()}
@@ -1003,12 +1011,14 @@ function videoGenerationTemplate() {
       ? `重试镜头 ${String(nextIndex + 1).padStart(2, '0')}`
       : `生成下一个镜头 ${String(nextIndex + 1).padStart(2, '0')}`;
   const batchButtonText = failed ? '批量重试失败镜头' : completed ? '批量继续生成' : '批量生成全部视频';
-  const progressHelp = !seedanceStatus.configured
+  const progressHelp = activeVideoProvider() === 'comfy'
+    ? (comfyVideoStatus.configured ? '仙宫云实例需保持运行；停止提交后，已提交任务可继续查询。' : '请先在视频设置中配置仙宫云 ComfyUI 地址。')
+    : !seedanceStatus.configured
     ? '尚未配置火山方舟 API Key，配置后即可调用 Seedance 2.0。'
     : certificationPending
       ? '完成方舟真人认证并填写 Asset ID 后，程序会自动重试当前镜头，并继续原来的批量任务。'
     : '可以“生成下一个镜头”，也可以“一键批量生成”；每张镜头卡仍可单独生成或重试。';
-  return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第四步 · Seedance 分镜视频</h4><p>${esc(seedanceModelLabel(state.model || seedanceStatus.model))} · ${esc(state.ratio || seedanceStatus.ratio)} · ${esc(state.resolution || seedanceStatus.resolution)} · 支持逐镜与批量 · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="outline-button" id="generateNextVideo" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(nextButtonText)}</button><button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(batchButtonText)}</button></div></div><div class="seedance-video-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
+  return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第四步 · ${activeVideoProvider() === 'comfy' ? '仙宫云 H3' : 'Seedance'} 分镜视频</h4><p>${esc(seedanceModelLabel(state.model || seedanceStatus.model))} · ${esc(state.ratio || seedanceStatus.ratio)} · ${esc(state.resolution || seedanceStatus.resolution)} · 支持逐镜与批量 · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="outline-button" id="generateNextVideo" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(nextButtonText)}</button><button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(batchButtonText)}</button></div></div><div class="seedance-video-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
 }
 
 function storyboardShotDuration(index, prompt, fallback = seedanceStatus.duration) {
@@ -1033,7 +1043,7 @@ function videoItemDuration(index, prompt, item, fallback = seedanceStatus.durati
 function effectiveVideoGenerationMode(state = project.videoGeneration || defaultProject.videoGeneration) {
   const items = Array.isArray(state.items) ? state.items : [];
   const hasGenerationHistory = items.some((item) => item.status && item.status !== 'pending');
-  return normalizeSeedanceGenerationMode(project.running || hasGenerationHistory ? state.generationMode : seedanceStatus.generationMode);
+  return normalizeSeedanceGenerationMode(project.running || hasGenerationHistory ? state.generationMode : currentVideoSettings().generationMode);
 }
 
 function videoDurationSummary(prompts, items = [], fallback = seedanceStatus.duration) {
@@ -1507,6 +1517,12 @@ function bindEvents() {
   document.querySelector('#seedanceSettingsModal').addEventListener('click', (event) => { if (event.target.id === 'seedanceSettingsModal') closeSeedanceSettings(); });
   document.querySelector('#saveSeedance').addEventListener('click', saveSeedanceSettings);
   document.querySelector('#testSeedance').addEventListener('click', testSeedanceConnection);
+  document.querySelector('#seedanceVideoProvider').addEventListener('change', (event) => { if (event.target.value === 'comfy') { closeSeedanceSettings(); openComfyVideoSettings(); } });
+  document.querySelector('#comfyVideoProvider').addEventListener('change', (event) => { if (event.target.value === 'seedance') { closeComfyVideoSettings(); openSeedanceSettings(true); } });
+  document.querySelector('#closeComfyVideoSettings').addEventListener('click', closeComfyVideoSettings);
+  document.querySelector('#comfyVideoSettingsModal').addEventListener('click', event => { if (event.target.id === 'comfyVideoSettingsModal') closeComfyVideoSettings(); });
+  document.querySelector('#saveComfyVideo').addEventListener('click', saveComfyVideoSettings);
+  document.querySelector('#testComfyVideo').addEventListener('click', testComfyVideoConnection);
   document.querySelectorAll('[data-seedance-generation-mode]').forEach((button) => button.addEventListener('click', () => selectSeedanceGenerationModeDraft(button.dataset.seedanceGenerationMode)));
   document.querySelector('#configureSeedance')?.addEventListener('click', openSeedanceSettings);
   document.querySelector('#confirmLocalAssets')?.addEventListener('click', confirmLocalAssets);
@@ -1728,13 +1744,14 @@ function stopCurrentGeneration() {
     videoState.items = (videoState.items || []).map((savedItem) => {
       const item = normalizeVideoItemVersions(savedItem);
       if (['creating', 'queued', 'running', 'downloading'].includes(item.status)) {
-        item.status = getSelectedVideoVersion(item) ? 'success' : 'pending';
-        item.taskId = '';
+        const resumable = item.taskProvider === 'comfy' && item.taskId;
+        item.status = resumable ? 'pending' : getSelectedVideoVersion(item) ? 'success' : 'pending';
+        if (!resumable) item.taskId = '';
       }
       return item;
     });
     videoState.generatedCount = videoState.items.filter((item) => getSelectedVideoVersion(item)).length;
-    const allSaved = videoState.items.length > 0 && videoState.generatedCount === videoState.items.length;
+    const allSaved = videoState.items.length > 0 && videoState.generatedCount === videoState.items.length && videoState.items.every(item => item.status === 'success');
     videoState.status = allSaved ? 'complete' : 'pending';
     if (allSaved && !project.completed.includes('video')) project.completed.push('video');
   }
@@ -1807,11 +1824,14 @@ function configureAutomaticSeedanceDurationField() {
   select.replaceWith(display);
 }
 function closeImageSettings() { document.querySelector('#imageSettingsModal').hidden = true; }
-function openSeedanceSettings() {
+function openSeedanceSettings(forceSeedance = false) {
+  if (project.running) return showToast('请先停止提交或等待当前任务结束后再修改连接。');
+  if (forceSeedance !== true && activeVideoProvider() === 'comfy') return openComfyVideoSettings();
   seedanceGenerationModeDraft = normalizeSeedanceGenerationMode(seedanceStatus.generationMode);
   const modal = document.querySelector('#seedanceSettingsModal');
   modal.hidden = false;
   selectSeedanceGenerationModeDraft(seedanceGenerationModeDraft);
+  document.querySelector('#seedanceVideoProvider').value = 'seedance';
   document.querySelector('#seedanceKey')?.focus();
 }
 function closeSeedanceSettings() { document.querySelector('#seedanceSettingsModal').hidden = true; }
@@ -1957,6 +1977,42 @@ function setSeedanceMessage(message, type = '') {
   node.className = `modal-message ${type}`;
 }
 
+function openComfyVideoSettings() {
+  if (project.running) return showToast('请先停止提交或等待当前任务结束。');
+  document.querySelector('#comfyVideoSettingsModal').hidden = false;
+  document.querySelector('#comfyVideoProvider').value = 'comfy';
+}
+function closeComfyVideoSettings() { document.querySelector('#comfyVideoSettingsModal').hidden = true; }
+function setComfyVideoMessage(text, type = '') {
+  const node = document.querySelector('#comfyVideoMessage');
+  node.textContent = text; node.className = `modal-message ${type}`;
+}
+async function testComfyVideoConnection() {
+  setComfyVideoMessage('正在检查 ComfyUI 节点和 H3 模型文件，不会提交生成任务…');
+  try {
+    const result = await window.storyforgeAI.testComfyVideoConnection(readComfyVideoSettings(document));
+    for (const key of ['model', 'clipModel', 'videoVae', 'audioVae']) document.querySelector(`#comfy-${key}`).value = result[key];
+    setComfyVideoMessage('连接正常，Ref2VA、文本编码器和音视频 VAE 已找到。', 'success');
+  } catch (error) { setComfyVideoMessage(cleanRemoteError(error, '连接失败。'), 'error'); }
+}
+async function saveComfyVideoSettings() {
+  if (project.running) return;
+  const owner = project;
+  try {
+    const settings = readComfyVideoSettings(document);
+    comfyVideoStatus = { ...comfyVideoStatus, ...(await window.storyforgeAI.saveComfyVideoSettings(settings)) };
+    if (project !== owner) return;
+    Object.assign(project.videoGeneration, { provider: 'comfy', model: comfyVideoStatus.model || 'MiniMax-H3-Base-Ref2VA', ratio: comfyVideoStatus.ratio, resolution: comfyVideoStatus.resolution, duration: 5, generationMode: comfyVideoStatus.generationMode, generateAudio: comfyVideoStatus.generateAudio, pendingCertification: null });
+    saveProject(); closeComfyVideoSettings(); render(); showToast('视频生成已切换为仙宫云 H3');
+  } catch (error) { setComfyVideoMessage(cleanRemoteError(error, '保存失败。'), 'error'); }
+}
+async function refreshComfyVideoStatus() {
+  if (!window.storyforgeAI?.getComfyVideoStatus) return;
+  try { comfyVideoStatus = { ...comfyVideoStatus, ...(await window.storyforgeAI.getComfyVideoStatus()) }; }
+  catch { comfyVideoStatus.configured = false; }
+  render();
+}
+
 async function saveSeedanceSettings() {
   const apiKey = document.querySelector('#seedanceKey').value.trim();
   const settings = {
@@ -1972,7 +2028,7 @@ async function saveSeedanceSettings() {
   setSeedanceMessage('正在使用 Windows 安全保存…');
   try {
     seedanceStatus = { ...seedanceStatus, ...(await window.storyforgeAI.saveSeedanceSettings(settings)), checking: false };
-    project.videoGeneration.generationMode = seedanceStatus.generationMode;
+    Object.assign(project.videoGeneration, { provider: 'seedance', model: seedanceStatus.model, ratio: seedanceStatus.ratio, resolution: seedanceStatus.resolution, generationMode: seedanceStatus.generationMode });
     saveProject();
     setSeedanceMessage('Seedance 设置已安全保存。', 'success');
     window.setTimeout(() => {
@@ -2910,7 +2966,7 @@ async function startGeneration(retry = false, { fullAuto = project.autoRunToVide
   const storyboardSettings = structuredClone(normalizeStoryboardGeneration(project.storyboardGeneration));
   if (!window.storyforgeAI && storyboardSettings.provider === 'codex-subscription') { openCodexTextSettings(); showToast('GPT 订阅生成需要更新后的桌面版。'); return; }
   if (!window.storyforgeAI || (storyboardSettings.provider === 'deepseek' && !deepseekStatus.configured)) { openModelSettings(); setModelMessage('请先配置 DeepSeek API Key，再开始生成。', 'error'); return; }
-  if (fullAuto && !seedanceStatus.configured) { openSeedanceSettings(); setSeedanceMessage('一键全流程需要先配置 Seedance 视频生成。', 'error'); return; }
+  if (fullAuto && !currentVideoSettings().configured) { openSeedanceSettings(); setSeedanceMessage('一键全流程需要先配置视频生成服务。', 'error'); return; }
 
   const token = ++generationRun;
   const ownerProject = project;
@@ -3093,6 +3149,7 @@ function appendVideoVersion(savedItem, saved, metadata = {}) {
     remoteVideoUrl: saved.remoteVideoUrl || metadata.remoteVideoUrl || '',
     taskId: metadata.taskId || saved.taskId || '',
     generatedAt: metadata.generatedAt || new Date().toISOString(),
+    provider: metadata.provider || 'seedance', actualDuration: metadata.actualDuration,
     duration: metadata.duration, usage: metadata.usage || null,
     model: metadata.model || '', ratio: metadata.ratio || '', resolution: metadata.resolution || '',
     generateAudio: metadata.generateAudio, prompt: metadata.prompt || '',
@@ -3108,12 +3165,13 @@ function appendVideoVersion(savedItem, saved, metadata = {}) {
 function initializeVideoGeneration(prompts) {
   project.videoGeneration = {
     status: 'pending',
-    model: seedanceStatus.model,
-    ratio: seedanceStatus.ratio,
-    resolution: seedanceStatus.resolution,
-    duration: seedanceStatus.duration,
-    generationMode: normalizeSeedanceGenerationMode(seedanceStatus.generationMode),
-    generateAudio: seedanceStatus.generateAudio,
+    provider: activeVideoProvider(),
+    model: currentVideoSettings().model,
+    ratio: currentVideoSettings().ratio,
+    resolution: currentVideoSettings().resolution,
+    duration: currentVideoSettings().duration,
+    generationMode: normalizeSeedanceGenerationMode(currentVideoSettings().generationMode),
+    generateAudio: currentVideoSettings().generateAudio,
     outputDirectory: '',
     generatedCount: 0,
     totalCount: prompts.length,
@@ -3121,7 +3179,7 @@ function initializeVideoGeneration(prompts) {
     pendingCertification: null,
     items: prompts.map((prompt, index) => ({
       fileName: `镜头-${String(index + 1).padStart(2, '0')}.mp4`,
-      duration: storyboardShotDuration(index, prompt, seedanceStatus.duration),
+      duration: storyboardShotDuration(index, prompt, currentVideoSettings().duration),
       status: 'pending',
       taskId: '',
       localPath: '',
@@ -3143,6 +3201,8 @@ function alignVideoGenerationItems(prompts) {
     duration: videoItemDuration(index, prompt, current[index], current[index]?.status === 'success' ? state.duration : state.duration || seedanceStatus.duration),
     status: current[index]?.status || 'pending',
     taskId: current[index]?.taskId || '',
+    taskProvider: current[index]?.taskProvider || '',
+    taskMetadata: current[index]?.taskMetadata || null,
     localPath: current[index]?.localPath || '',
     videoFileUrl: current[index]?.videoFileUrl || '',
     remoteVideoUrl: current[index]?.remoteVideoUrl || '',
@@ -3167,7 +3227,8 @@ function alignVideoGenerationItems(prompts) {
 function prepareSeedancePrompt(prompt, shotIndex) {
   const shot = project.outputs.storyboard?.shots?.[shotIndex] || {};
   const item = project.videoGeneration?.items?.[shotIndex] || {};
-  return buildSeedanceReferenceRequest({
+  const build = activeVideoProvider() === 'comfy' ? buildH3ReferenceRequest : buildSeedanceReferenceRequest;
+  return build({
     prompt,
     shot,
     assetItems: project.assetGeneration?.items || [],
@@ -3196,12 +3257,13 @@ function blockedPortraitInputs(message, prepared) {
 async function pollSeedanceTask(taskId, token, state, index, ownerProject = project) {
   const isCurrent = () => token === generationRun && project === ownerProject && ownerProject.videoGeneration === state;
   let transientFailures = 0;
-  for (let attempt = 0; attempt < 180; attempt += 1) {
+  const comfy = state.provider === 'comfy';
+  for (let attempt = 0; attempt < (comfy ? 720 : 180); attempt += 1) {
     if (!isCurrent()) return null;
     if (attempt > 0) await wait(10000);
     if (!isCurrent()) return null;
     try {
-      const task = await window.storyforgeAI.getSeedanceTask(taskId);
+      const task = await (comfy ? window.storyforgeAI.getComfyVideoTask(taskId) : window.storyforgeAI.getSeedanceTask(taskId));
       if (!isCurrent()) return null;
       transientFailures = 0;
       const remoteStatus = task.status === 'pending' ? 'queued' : task.status;
@@ -3209,14 +3271,14 @@ async function pollSeedanceTask(taskId, token, state, index, ownerProject = proj
       state.items[index] = { ...state.items[index], status: displayStatus, remoteVideoUrl: task.videoUrl || '', usage: task.usage || null };
       saveProject(); renderWithoutMovingPage();
       if (remoteStatus === 'succeeded' || (remoteStatus === 'success' && task.videoUrl)) return task;
-      if (remoteStatus === 'failed') throw new Error(task.error || 'Seedance 视频任务失败。');
+      if (remoteStatus === 'failed') { const error = new Error(task.error || '视频任务失败。'); error.terminal = true; throw error; }
     } catch (error) {
       if (!isCurrent()) return null;
       transientFailures += 1;
-      if (transientFailures >= 3 || /任务失败|无效|权限|额度|余额|尚未开通/.test(String(error?.message || ''))) throw error;
+      if (error.terminal || transientFailures >= 3 || /任务失败|无效|权限|额度|余额|尚未开通/.test(String(error?.message || ''))) throw error;
     }
   }
-  throw new Error('Seedance 视频任务等待超过 30 分钟，请稍后重试或到火山方舟控制台查看。');
+  throw new Error(comfy ? 'H3 等待超过2小时，任务编号已保留，可稍后继续查询。' : 'Seedance 视频任务等待超过 30 分钟，请稍后重试或到火山方舟控制台查看。');
 }
 
 async function generateSeedanceVideos({ token, indexes = null, force = false, mode = null, stopOnFailure = false, pipelineRun = null, viewSequence = viewNavigationSequence }) {
@@ -3224,23 +3286,28 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
   const videoFocus = pipelineRun || { ownerProject: project, viewSequence };
   const prompts = project.outputs.storyboard?.prompts || [];
   if (!prompts.length) return showToast('第二步还没有可生成的视频分镜');
-  if (!window.storyforgeAI || !seedanceStatus.configured) {
+  const provider = activeVideoProvider();
+  const settings = { ...currentVideoSettings() };
+  const comfy = provider === 'comfy';
+  if (!window.storyforgeAI || !settings.configured || (comfy && !window.storyforgeAI.createComfyVideoTask)) {
     project.running = false;
     focusGenerationStep('video', videoFocus);
     saveProject(); renderWithoutMovingPage();
     openSeedanceSettings();
-    setSeedanceMessage('请先配置火山方舟 API Key。保存后即可开始第四步。', 'error');
+    if (comfy) setComfyVideoMessage('请先配置仙宫云 ComfyUI 访问地址。', 'error');
+    else setSeedanceMessage('请先配置火山方舟 API Key。保存后即可开始第四步。', 'error');
     return;
   }
   if (!project.outputs.video) project.outputs.video = makeOutput('video');
   const state = alignVideoGenerationItems(prompts);
   const isCurrent = () => token === generationRun && project === ownerProject && ownerProject.videoGeneration === state;
-  state.model = seedanceStatus.model;
-  state.ratio = seedanceStatus.ratio;
-  state.resolution = seedanceStatus.resolution;
-  state.duration = seedanceStatus.duration;
-  state.generationMode = normalizeSeedanceGenerationMode(mode || seedanceStatus.generationMode);
-  state.generateAudio = seedanceStatus.generateAudio;
+  state.provider = provider;
+  state.model = settings.model || (comfy ? 'MiniMax-H3-Base-Ref2VA' : SEEDANCE_DEFAULT_MODEL);
+  state.ratio = settings.ratio;
+  state.resolution = settings.resolution;
+  state.duration = settings.duration;
+  state.generationMode = normalizeSeedanceGenerationMode(mode || settings.generationMode);
+  state.generateAudio = settings.generateAudio;
   state.lastError = '';
   const selection = selectSeedanceGenerationIndexes(state.items, { indexes, force, mode: state.generationMode });
   if (!selection.candidates.length) return showToast('所有分镜视频都已经生成');
@@ -3297,12 +3364,19 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
     try {
       prepared = prepareSeedancePrompt(promptForGeneration, index);
       const requestMetadata = {
-        model: state.model, ratio: state.ratio, resolution: state.resolution,
+        provider, model: state.model, ratio: state.ratio, resolution: state.resolution,
         generateAudio: state.generateAudio, duration, prompt: prepared.prompt,
       };
-      state.items[index] = { ...state.items[index], duration, status: 'creating', taskId: '', error: '' };
+      const previousTask = state.items[index];
+      const resume = comfy && previousTask.taskProvider === 'comfy' && previousTask.taskId;
+      const handle = resume || (comfy ? `comfy-${globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.floor(Math.random() * 16); return (c === 'x' ? r : (r & 3) | 8).toString(16); })}` : '');
+      // Save a known handle before crossing IPC. A stopped/reloaded UI must not
+      // submit a second task just because the first submission response is late.
+      state.items[index] = { ...previousTask, duration, status: 'creating', taskId: handle, taskProvider: provider, taskMetadata: comfy ? (resume ? previousTask.taskMetadata : requestMetadata) : null, error: '' };
       saveProject(); renderWithoutMovingPage();
-      const created = await window.storyforgeAI.createSeedanceTask({
+      const create = comfy ? window.storyforgeAI.createComfyVideoTask : window.storyforgeAI.createSeedanceTask;
+      const created = resume ? { id: previousTask.taskId, status: 'queued' } : await create({
+        ...(comfy ? { taskId: handle } : {}),
         model: state.model,
         prompt: prepared.prompt,
         imageInputs: prepared.imageInputs,
@@ -3312,6 +3386,10 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
         duration,
         generateAudio: state.generateAudio,
       });
+      if (comfy && state.items[index]?.taskId === handle) {
+        state.items[index] = { ...state.items[index], taskId: created.id, taskProvider: 'comfy', taskMetadata: resume ? previousTask.taskMetadata : { ...requestMetadata, model: created.model || requestMetadata.model, actualDuration: created.actualDuration } };
+        saveProjectLibrary();
+      }
       if (!isCurrent()) return;
       state.items[index] = { ...state.items[index], status: created.status === 'running' ? 'running' : 'queued', taskId: created.id };
       saveProject(); renderWithoutMovingPage();
@@ -3319,7 +3397,8 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
       if (!task || !isCurrent()) return;
       state.items[index] = { ...state.items[index], status: 'downloading', remoteVideoUrl: task.videoUrl };
       saveProject(); renderWithoutMovingPage();
-      const saved = await window.storyforgeAI.downloadSeedanceVideo({
+      const download = comfy ? window.storyforgeAI.downloadComfyVideo : window.storyforgeAI.downloadSeedanceVideo;
+      const saved = await download({
         taskId: created.id,
         projectId: ownerProject.id,
         projectTitle: ownerProject.title,
@@ -3328,7 +3407,8 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
       });
       if (!isCurrent()) return;
       state.items[index] = appendVideoVersion(state.items[index], saved, {
-        ...requestMetadata, taskId: created.id, remoteVideoUrl: task.videoUrl,
+        ...(comfy ? state.items[index].taskMetadata || requestMetadata : requestMetadata), taskId: created.id, remoteVideoUrl: task.videoUrl,
+        ...(comfy ? { model: task.model || state.items[index].taskMetadata?.model || state.model, actualDuration: task.actualDuration || state.items[index].taskMetadata?.actualDuration } : {}),
         usage: task.usage || state.items[index].usage || null,
         generatedAt: new Date().toISOString(),
       });
@@ -3336,7 +3416,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
     } catch (error) {
       if (!isCurrent()) return;
       const message = cleanRemoteError(error, 'Seedance 视频生成失败');
-      const blockedInputs = isPortraitSafetyError(message) && prepared ? blockedPortraitInputs(message, prepared) : [];
+      const blockedInputs = !comfy && isPortraitSafetyError(message) && prepared ? blockedPortraitInputs(message, prepared) : [];
       if (blockedInputs.length) {
         state.items[index] = { ...state.items[index], status: 'certification', error: '参考图可能包含真人，请完成方舟真人素材认证；保存 Asset ID 后将自动继续生成。' };
         state.pendingCertification = {
@@ -3368,7 +3448,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
   const generatedIndex = requested[requested.length - 1];
   const nextIndex = state.items.findIndex((item) => item.status !== 'success');
   const resultMessage = allComplete && !failed && !certificationTriggered
-    ? `Seedance 已生成并保存 ${state.generatedCount} 个视频镜头`
+    ? `${comfy ? '仙宫云 H3' : 'Seedance'} 已生成并保存 ${state.generatedCount} 个视频镜头`
     : certificationTriggered
       ? `镜头 ${String(Number(state.pendingCertification?.shotIndex || 0) + 1).padStart(2, '0')} 需要真人素材认证，完成后会自动继续`
     : state.lastError
@@ -3470,4 +3550,5 @@ refreshCodexTextStatus();
 refreshSeedreamStatus();
 refreshOpenAIImageStatus();
 refreshSeedanceStatus();
+refreshComfyVideoStatus();
 refreshCodexImageStatus();

@@ -172,7 +172,7 @@ export function extractAssetReferences(prompt, assetItems = []) {
   return references;
 }
 
-function replaceReferenceOccurrences(prompt, references, replacement) {
+export function replaceReferenceOccurrences(prompt, references, replacement) {
   let result = text(prompt);
   for (const reference of [...references].reverse()) {
     const value = replacement(reference);

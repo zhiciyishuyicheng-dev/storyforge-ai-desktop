@@ -1,3 +1,5 @@
+import * as comfyUI from './comfy-video-ui.js';
+import * as h3 from './h3-references.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -17,7 +19,7 @@ function harness(api = {}) {
     ...durations,
     ...references,
     ...generation,
-    ...workflowProgress,
+    ...workflowProgress, ...comfyUI, ...h3,
     localStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { storyforgeAI: api, setTimeout: () => 1, setInterval: (callback) => { const id = Symbol('timer'); intervals.set(id, callback); return id; }, clearInterval: (id) => intervals.delete(id) },
     document: { querySelector: () => null, querySelectorAll: () => [] },
