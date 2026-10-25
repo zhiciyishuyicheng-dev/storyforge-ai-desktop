@@ -15,7 +15,6 @@ jobs:
       run:
         shell: pwsh
     env:
-      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}\electron-builder
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - uses: actions/checkout@v7
@@ -42,6 +41,7 @@ jobs:
         run: npm run build
       - name: Build Windows installer
         run: |
+          $env:ELECTRON_BUILDER_CACHE = Join-Path $env:RUNNER_TEMP 'electron-builder'
           $wrapper = Join-Path $env:RUNNER_TEMP 'storyforge-pack.cjs'
           @'
           const path = require('node:path');
