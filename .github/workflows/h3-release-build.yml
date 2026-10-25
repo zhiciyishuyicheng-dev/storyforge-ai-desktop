@@ -1,0 +1,78 @@
+name: Build H3 1.0.5 preview assets
+
+on:
+  push:
+    branches: [release/h3-build-1.0.5]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}\electron-builder
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: b06a1062477705c6f8801ceb72e5ff0b82e43a1d
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install exact locked dependencies
+        run: |
+          node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package-lock.json','utf8'));for(const x of Object.values(p.packages)){if(x.resolved?.startsWith('https://registry.npmmirror.com/'))x.resolved=x.resolved.replace('https://registry.npmmirror.com/','https://registry.npmjs.org/')}fs.writeFileSync('package-lock.json',JSON.stringify(p,null,2)+'\n')"
+          npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+      - name: Install official Electron runtime
+        run: |
+          $version = node -p "require('./package-lock.json').packages['node_modules/electron'].version"
+          $zip = Join-Path $env:RUNNER_TEMP 'electron.zip'
+          Invoke-WebRequest "https://github.com/electron/electron/releases/download/v$version/electron-v$version-win32-x64.zip" -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath node_modules/electron/dist -Force
+          Set-Content -LiteralPath node_modules/electron/path.txt -Value electron.exe -Encoding ascii -NoNewline
+      - name: Run all tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: Build Windows installer
+        run: |
+          $wrapper = Join-Path $env:RUNNER_TEMP 'storyforge-pack.cjs'
+          @'
+          const path = require('node:path');
+          const fs = require('node:fs');
+          const { spawn } = require('node:child_process');
+          const repo = process.cwd();
+          const { NodeModulesCollector } = require(path.join(repo, 'node_modules/app-builder-lib/out/node-module-collector/nodeModulesCollector.js'));
+          const original = NodeModulesCollector.prototype.streamCollectorCommandToFile;
+          NodeModulesCollector.prototype.streamCollectorCommandToFile = function(command, args, cwd, output) {
+            if (!/npm(?:\.cmd)?$/i.test(command)) return original.call(this, command, args, cwd, output);
+            return new Promise((resolve, reject) => {
+              const file = fs.createWriteStream(output);
+              const npmCli = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+              const child = spawn(process.execPath, [npmCli, ...args], { cwd, windowsHide: true });
+              child.stdout.pipe(file);
+              let error = ''; child.stderr.on('data', data => error += data);
+              child.on('error', reject);
+              child.on('exit', code => file.end(() => code === 0 || code === 1 ? resolve() : reject(new Error(error))));
+            });
+          };
+          require(path.join(repo, 'scripts/desktop-pack.cjs')).runDesktopPack(['--win','nsis','--x64','--config.electronDist=node_modules/electron/dist','--config.npmRebuild=false','--config.win.signAndEditExecutable=false','--publish','never']).catch(error => { console.error(error); process.exitCode = 1; });
+          '@ | Set-Content -LiteralPath $wrapper -Encoding utf8
+          node $wrapper
+      - name: Prepare source and checksums
+        run: |
+          git archive --format=zip --prefix=storyforge-ai-desktop/ --output=release-v1.0.5/StoryForge-H3-1.0.5-source.zip HEAD
+          $files = @('release-v1.0.5/StoryForge-Setup-1.0.5-x64.exe','release-v1.0.5/StoryForge-H3-1.0.5-source.zip')
+          $lines = $files | ForEach-Object { $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(); "$hash  $([System.IO.Path]::GetFileName($_))" }
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'release-v1.0.5/SHA256SUMS.txt'), ($lines -join "`n") + "`n")
+      - name: Upload assets to existing preview draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v1.0.5 release-v1.0.5/StoryForge-Setup-1.0.5-x64.exe release-v1.0.5/StoryForge-H3-1.0.5-source.zip release-v1.0.5/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY
