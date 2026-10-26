@@ -1,6 +1,17 @@
 const { app, BrowserWindow, shell, ipcMain, safeStorage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+// Keep the installed app's existing profile when changing its display name.
+// Respect an explicitly selected userData path (for example --user-data-dir).
+if (app.isPackaged) {
+  const appData = app.getPath('appData');
+  const defaultProfile = path.join(appData, app.getName());
+  if (path.resolve(app.getPath('userData')).toLowerCase() === path.resolve(defaultProfile).toLowerCase()) {
+    const existingProfile = path.join(appData, 'StoryForge AI 短剧工坊');
+    fs.mkdirSync(existingProfile, { recursive: true });
+    app.setPath('userData', existingProfile);
+  }
+}
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('url');
 const { createWorkflowRunner } = require('./deepseek-workflow.cjs');
@@ -683,7 +694,8 @@ const createWindow = () => {
     height: 920,
     minWidth: 1080,
     minHeight: 700,
-    title: 'StoryForge AI 短剧工坊',
+    title: 'AI Studio',
+    icon: path.join(__dirname, '..', 'dist', 'studio.ico'),
     backgroundColor: '#f5f6f8',
     autoHideMenuBar: true,
     show: false,
@@ -729,6 +741,7 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') app.setAppUserModelId('com.storyforge.desktop');
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

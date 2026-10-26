@@ -8,8 +8,8 @@ button, textarea { font: inherit; }
 button { border: 0; cursor: pointer; color: inherit; }
 .shell { display:flex; height:100vh; overflow:hidden; }
 .sidebar { width:390px; height:100vh; flex:0 0 390px; padding:24px 20px 18px; background:#fbfbfc; border-right:1px solid var(--line); display:flex; flex-direction:column; overflow-y:auto; }
-.brand { font-size:21px; font-weight:800; letter-spacing:-.8px; padding:0 12px 34px; color:#262832; }
-.brand-mark { color:var(--purple); font-size:23px; margin-right:7px; }
+.brand { display:flex; align-items:center; gap:9px; font-size:21px; font-weight:800; letter-spacing:-.8px; padding:0 12px 34px; color:#262832; }
+.brand-mark { width:32px; height:32px; object-fit:contain; flex-shrink:0; }
 .brand-accent { color:var(--purple); }
 .new-project { height:42px; border:1px solid #dddde5; background:#fff; border-radius:9px; text-align:left; padding:0 12px; font-size:13px; font-weight:700; box-shadow:0 2px 8px #20243a08; }
 .new-project span { font-size:19px; color:var(--purple); vertical-align:-1px; margin-right:8px; }

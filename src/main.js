@@ -786,7 +786,7 @@ function appTemplate() {
   return `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brand"><span class="brand-mark">✦</span><span>story<span class="brand-accent">forge</span></span></div>
+        <div class="brand"><img class="brand-mark" src="./studio.ico" alt="" /><span>AI Studio</span></div>
         <button class="new-project" id="newProject"><span>＋</span> 新建项目 <kbd>Ctrl N</kbd></button>
         <div class="side-label">我的项目 <span>${projectLibrary.projects.length}</span></div>
         <div class="project-list">
