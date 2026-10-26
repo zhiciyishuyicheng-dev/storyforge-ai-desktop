@@ -2,13 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { createWorkflowRunner } = require('./deepseek-workflow.cjs');
-const { outlineResult, normalizeConfirmedOutline } = require('./generation-stages.cjs');
+const { outlineResult, normalizeConfirmedOutline, outlineMessages } = require('./generation-stages.cjs');
 const { validateCandidate, canPublishIgnoredCandidate, buildIgnoredAuditSummary } = require('./storyboard-policy.cjs');
 const { makeSystemPrompt, makeAuditSystemPrompt } = require('./deepseek-prompt.cjs');
 
 const script = '阿宁在书房打开信封，看见来信后抬头。';
 const skills = { storyboard: { name: '分镜.md', content: '分镜专属要求：保持原文，按自然节点设计。' }, assets: { name: '资产.md', content: '资产专属要求：人物图使用版画风。' } };
-const outline = () => ({ title: '分镜大纲', rows: [{ no: '01', duration: 5, scene: '书房', content: '阿宁打开来信。镜头观察拆信动作与读信后的反应。' }] });
+const outline = () => ({ title: '分镜大纲', rows: [{ no: '01', duration: 5, scene: '书房', content: '阿宁在书房打开来信，读信后抬头。' }] });
 const manifest = () => ({ characters: [{ name: '阿宁', fileName: '阿宁.png', description: '实际出镜人物' }], scenes: [{ name: '书房', fileName: '书房.png', description: '来信发生的书房' }], props: [], groups: [], characterChecklist: [{ name: '阿宁', requiresReferenceImage: true }], characterDifferenceMatrix: [] });
 function storyboard() {
   return { outline: outline(), storyboard: { shots: [{ no: '01', duration: 5, title: '打开来信', scene: '书房', outline: outline().rows[0].content, sceneId: 'S01',
@@ -57,6 +57,50 @@ test('大纲拒绝完整工作流和执行字段，最多修正一次且不泄�
   assert.equal(broken.calls.length, 2);
 });
 
+test('大纲只交付简要剧情，时间片或长段执行正文须修正而非直接交付', async () => {
+  const detailed = [
+    ['0-4秒：阿宁拆信。4-5秒：她读信后抬头。', 'OUTLINE_TIME_SLICES'],
+    ['[0—4] 阿宁拆信，[4—5] 抬头。', 'OUTLINE_TIME_SLICES'],
+    ['00:00–00:04 阿宁拆信，00:04–00:05 抬头。', 'OUTLINE_TIME_SLICES'],
+    ['[0.0s ~ 4.0s] 阿宁拆信。', 'OUTLINE_TIME_SLICES'],
+    ['阿宁拆信。\n配音：阿宁用成年女声读出整封信。', 'OUTLINE_EXECUTION_CONTENT'],
+    ['阿宁在书房打开来信，仔细查看信上的内容并抬头望向门口。'.repeat(8), 'OUTLINE_SUMMARY_LENGTH'],
+  ];
+  for (const provider of ['deepseek', 'codex-subscription']) {
+    for (const [content, expectedCode] of detailed) {
+      const old = outline(); old.rows[0].content = content;
+      const original = structuredClone(old);
+      const api = transport([{ outline: old }, { outline: outline() }]);
+      const result = await createWorkflowRunner({ request: api.request, provider })(script, { stage: 'outline', stageSkills: skills });
+      assert.deepEqual(api.calls.map(call => call.options.phase), ['candidate', 'repair']);
+      assert.ok(api.calls[1].messages.at(-1).content.includes(expectedCode));
+      assert.deepEqual(result.data.outline.rows, outline().rows);
+      assert.equal(result.data.outline.rows[0].duration, 5, 'Do not remove the independent duration column');
+      assert.deepEqual(old, original, 'Do not trim detailed source into a fabricated summary');
+    }
+  }
+});
+
+test('未修正的时间片大纲不可交付，原文内容及总时长不被自动删改', async () => {
+  const old = outline(); old.rows[0].content = '0-4秒：阿宁拆信。4-5秒：抬头。';
+  const api = transport([{ outline: old }, { outline: old }]);
+  await assert.rejects(createWorkflowRunner({ request: api.request })(script, { stage: 'outline' }), error => error.code === 'STAGE_VALIDATION_FAILED' && error.issues.some(issue => issue.code === 'OUTLINE_TIME_SLICES'));
+  assert.equal(api.calls.length, 2);
+  assert.equal(old.rows[0].duration, 5);
+  assert.equal(JSON.parse(api.calls[0].messages[1].content).originalScript, script);
+});
+
+test('内置及用户Skill的大纲提示词明确仅写剧情概述，时间片留到第二步', () => {
+  for (const stageSkills of [{}, skills]) {
+    const prompt = outlineMessages(script, { stageSkills })[0].content;
+    assert.match(prompt, /一至两句简短中文/u);
+    assert.match(prompt, /最多160字/u);
+    assert.match(prompt, /不得逐镜拆解/u);
+    assert.match(prompt, /预计总时长只写在duration字段/u);
+    assert.match(prompt, /只用于第二步正式分镜/u);
+  }
+});
+
 test('大纲保留真实时长与范围，平台约束不静默改秒数', () => {
   for (const duration of [0, NaN, '5秒', 16, 2.5]) {
     const value = outline(); value.rows[0].duration = duration;
@@ -97,6 +141,22 @@ test('第二步独立审计分镜，仅生成素材身份，严格继承用户�
   for (const call of api.calls) assert.ok(!call.messages.some(message => message.content.includes(skills.assets.content)));
   assert.deepEqual(value, original);
   assert.equal(result.data.storyboard.verification.stageSkills.assets, null);
+});
+
+test('旧版已确认大纲原样进入第二步，详细分镜的时间片和提示词仍保留', async () => {
+  const confirmed = outline();
+  confirmed.rows[0].content = '0-4秒：阿宁在书房拆开信封。4-5秒：她读信后抬头。';
+  const value = storyboard();
+  value.outline = structuredClone(confirmed);
+  value.storyboard.shots[0].outline = confirmed.rows[0].content;
+  const original = structuredClone(value);
+  const api = transport([value, audit(value)]);
+  const result = await createWorkflowRunner({ request: api.request })(script, { stage: 'storyboard', confirmedOutline: confirmed, stageSkills: skills });
+  assert.deepEqual(result.data.outline, confirmed);
+  assert.equal(result.data.storyboard.shots[0].outline, confirmed.rows[0].content);
+  assert.deepEqual(result.data.storyboard.shots[0].segments, original.storyboard.shots[0].segments);
+  assert.equal(result.data.storyboard.shots[0].prompt, original.storyboard.shots[0].prompt);
+  assert.deepEqual(value, original);
 });
 
 test('回炉不能擅改确认大纲，时长或内容冲突在一次修正后仍阻止交付', async () => {

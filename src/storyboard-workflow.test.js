@@ -442,9 +442,13 @@ test('第一步按最终生成块展示四列表格，审计修正后的顺序�
   h.context.data = data;
   h.run('project.outputs = renderAIWorkflow(data); project.activeStep = "analysis"; project.outputs.analysis.title = "旧故事分析"; project.outputs.analysis.body = "不应显示的旧分析卡片"; project.outputs.analysis.outline.rows.reverse();');
   let html = h.run('outputContentTemplate()');
-  for (const label of ['分镜大纲', '生成块', '预计时长', '场景', '剧情内容与镜头重点']) assert.match(html, new RegExp(label));
+  for (const label of ['分镜大纲', '生成块', '预计时长', '场景', '剧情概述']) assert.match(html, new RegExp(label));
   assert.doesNotMatch(html, /旧故事分析|不应显示的旧分析卡片|故事定位|主要人物|\*\*/);
-  assert.match(html, /<strong>成果被冒领。<\/strong>/);
+  assert.match(html, /成果被冒领。/);
+  assert.match(html, /result-layout outline-layout/);
+  assert.doesNotMatch(html, /class="result-side"|大纲规模/);
+  assert.equal((html.match(/id="rerunStep"/g) || []).length, 1);
+  assert.match(html, /id="confirmNextTextStage"/);
   assert.match(html, /2 个生成块 · 预计总时长 25 秒/);
   assert.ok(html.indexOf('成果被冒领') < html.indexOf('被迫接受安排'));
   assert.deepEqual(h.snapshot('currentStoryboardOutline().rows.map(({no,duration,scene}) => ({no,duration,scene}))'), [
@@ -490,7 +494,7 @@ test('复制和导出第一步使用同一份最终大纲，不受旧 HTML 或�
   h.context.URL = { createObjectURL: () => 'blob:export', revokeObjectURL: () => {} };
   h.context.document.createElement = () => ({ click() {} });
   h.run('project.outputs = renderAIWorkflow(data); project.activeStep = "analysis"; project.outputs.analysis.body = "旧分析缓存"; project.outputs.storyboard.shots[0].duration = 11; copyText = captureCopy; copyOutput(); exportProject();');
-  assert.match(copied, /\| 生成块 \| 预计时长 \| 场景 \| 剧情内容与镜头重点 \|/);
+  assert.match(copied, /\| 生成块 \| 预计时长 \| 场景 \| 剧情概述 \|/);
   assert.match(copied, /\| 01 \| 11秒 \| 书房 \| 得到线索/);
   assert.doesNotMatch(copied, /旧分析缓存|人物校验|审计结果/);
   assert.equal(exported.outputs.analysis.title, '分镜大纲');
@@ -1464,7 +1468,7 @@ test('后台生成视频时可查看分析，切换不会停止任务或把分�
   assert.equal(h.run('runningGenerationStep(project)'), 'video');
   assert.match(h.run('stepTemplate(steps[3])'), /class="step [^"]*running/);
   assert.doesNotMatch(h.run('stepTemplate(steps[0])'), /class="step [^"]*running/);
-  assert.match(h.run('outputContentTemplate()'), /阶段状态<\/span><b><i><\/i> 已完成/);
+  assert.match(h.run('outputContentTemplate()'), /outline-result-status">已完成/);
   resolveTask({id:'background-video',status:'running'});
   await running;
   assert.equal(h.run('project.videoGeneration.items[0].localPath'), 'C:/background-video.mp4');

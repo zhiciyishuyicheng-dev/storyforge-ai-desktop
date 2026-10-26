@@ -1,4 +1,4 @@
-const HEADERS = ['生成块', '预计时长', '场景', '剧情内容与镜头重点'];
+const HEADERS = ['生成块', '预计时长', '场景', '剧情概述'];
 const UNKNOWN_SCENE = '场景待定';
 const UNKNOWN_CONTENT = '剧情内容待补充';
 
@@ -169,19 +169,44 @@ function durationLabel(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? `${value}秒` : '待定';
 }
 
+// Display and copy a brief outline without changing the confirmed source rows.
+// Older projects can still store complete production prompts in their outline.
+export function briefOutlineContent(row = {}) {
+  const source = plainText(row.content || row.details);
+  const timeSlice = /(?<!\d)(?:镜头\s*\d+\s*[（(]?\s*)?[\[【（(]?\s*(?:\d{1,2}:\d{1,2}(?:\.\d+)?\s*[-—–~～至到]\s*\d{1,2}:\d{1,2}(?:\.\d+)?|\d{1,2}(?:\.\d+)?\s*(?:秒|s)?\s*[-—–~～至到]\s*\d{1,2}(?:\.\d+)?(?!\d)\s*(?:秒|s\b))\s*[\]】）)]?\s*[：:]?/gi;
+  const prefixTimeSlice = /^(?:镜头\s*\d+\s*[：:]?\s*)?(?:[\[【（(]\s*\d{1,2}(?:\.\d+)?\s*[-—–~～至到]\s*\d{1,2}(?:\.\d+)?\s*[\]】）)]|\d{1,2}(?:\.\d+)?\s*[-—–~～至到]\s*\d{1,2}(?:\.\d+)?\s*[：:])\s*[：:]?\s*/i;
+  const lines = source.replace(/^旧版提示词(?:提取|原文)[：:]\s*/u, '').split(/\r?\n/).map(line => line.replace(/^#{1,6}\s*/, '').trim()).filter(Boolean);
+  const sliced = timeSlice.test(source) || lines.some(line => prefixTimeSlice.test(line));
+  timeSlice.lastIndex = 0;
+  const metadata = /^(?:人物|角色|场景|道具|本段总时长|总时长|视频时长|时长|声音|音效|配音|旁白|对白|字幕|BGM|统一附加词|参考素材)\s*[：:]/i;
+  const first = lines[0] || '';
+  const title = plainText(row.title) || (sliced && first.length <= 40 && !metadata.test(first) && !/\d\s*[-—–~～至到]/.test(first) ? first : '');
+  // Existing timed scripts often start with a useful block title. Reuse it
+  // rather than inventing a plot summary or exposing the detailed prompt.
+  const content = lines.filter(line => !metadata.test(line)).map(line => line.replace(prefixTimeSlice, '')).join(' ')
+    .replace(timeSlice, '')
+    .replace(/【(?:配音|音效|声音|旁白|对白|字幕|BGM)[：:][\s\S]*?】/gi, '')
+    .replace(/^(?:画面(?:内容|描述)?|视觉(?:内容|描述)?|镜头(?:内容|描述|画面|设计))\s*[：:]\s*/u, '')
+    .replace(/\s+/g, ' ').trim();
+  let brief = content.length > 160 && title ? title : content;
+  brief = (brief.match(/[^。！？!?]+[。！？!?]?/gu) || []).slice(0, 2).join('').trim();
+  if (Array.from(brief).length > 160) brief = Array.from(brief).slice(0, 159).join('').replace(/[，,；;：:\s]+$/u, '') + '…';
+  return brief || UNKNOWN_CONTENT;
+}
+
 /** The first workflow step is a plain, accessible four-column outline table. */
 export function storyboardOutlineTemplate(outline = {}) {
   const rows = Array.isArray(outline.rows) ? outline.rows : [];
-  return `<div class="storyboard-outline"><div class="storyboard-outline-scroll" tabindex="0" role="region" aria-label="分镜大纲表格"><table class="storyboard-outline-table"><caption class="storyboard-outline-caption">分镜大纲</caption><colgroup><col class="outline-no"><col class="outline-duration"><col class="outline-scene"><col class="outline-content"></colgroup><thead><tr>${HEADERS.map((header) => `<th scope="col">${header}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><th scope="row">${escapeHtml(plainText(row.no))}</th><td class="outline-duration-cell">${escapeHtml(durationLabel(row.duration))}</td><td>${contentHtml(row.scene || UNKNOWN_SCENE)}</td><td class="outline-content-cell"><div>${contentHtml(row.content || UNKNOWN_CONTENT)}</div>${text(row.details) ? `<details class="storyboard-outline-details"><summary>展开完整镜头内容</summary><div>${contentHtml(row.details)}</div></details>` : ''}</td></tr>`).join('') : '<tr><td class="storyboard-outline-empty" colspan="4">暂无分镜大纲，请先生成分镜。</td></tr>'}</tbody></table></div></div>`;
+  return `<div class="storyboard-outline"><div class="storyboard-outline-scroll" tabindex="0" role="region" aria-label="分镜大纲表格"><table class="storyboard-outline-table"><caption class="storyboard-outline-caption">分镜大纲</caption><colgroup><col class="outline-no"><col class="outline-duration"><col class="outline-scene"><col class="outline-content"></colgroup><thead><tr>${HEADERS.map((header) => `<th scope="col">${header}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><th scope="row">${escapeHtml(plainText(row.no))}</th><td class="outline-duration-cell">${escapeHtml(durationLabel(row.duration))}</td><td>${contentHtml(row.scene || UNKNOWN_SCENE)}</td><td class="outline-content-cell"><div>${contentHtml(briefOutlineContent(row))}</div></td></tr>`).join('') : '<tr><td class="storyboard-outline-empty" colspan="4">暂无分镜大纲，请先生成分镜。</td></tr>'}</tbody></table></div></div>`;
 }
 
-/** Markdown keeps the same four columns and includes complete legacy source text. */
+/** Markdown copies the same brief four-column outline shown on screen. */
 export function serializeStoryboardOutline(outline = {}) {
   const cell = (value) => plainText(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
   const rows = Array.isArray(outline.rows) ? outline.rows : [];
   return [
     `| ${HEADERS.join(' | ')} |`,
     '| --- | ---: | --- | --- |',
-    ...rows.map((row) => `| ${[row.no, durationLabel(row.duration), row.scene || UNKNOWN_SCENE, row.details || row.content || UNKNOWN_CONTENT].map(cell).join(' | ')} |`),
+    ...rows.map((row) => `| ${[row.no, durationLabel(row.duration), row.scene || UNKNOWN_SCENE, briefOutlineContent(row)].map(cell).join(' | ')} |`),
   ].join('\n');
 }

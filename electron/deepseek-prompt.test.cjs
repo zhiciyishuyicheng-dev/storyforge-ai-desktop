@@ -42,7 +42,7 @@ test('workflow schema requests a per-block outline, storyboard and assets withou
     assert.equal(typeof schema.storyboard.shots[0].outline, 'string');
     assert.equal(typeof schema.storyboard.shots[0].scene, 'string');
     assert.equal(Object.hasOwn(schema, 'analysis'), false);
-    assert.ok(prompt.includes('生成块 | 预计时长 | 场景 | 剧情内容与镜头重点'));
+    assert.ok(prompt.includes('生成块 | 预计时长 | 场景 | 剧情概述'));
     assert.ok(prompt.includes('不生成分集大纲，不输出中间改编稿，不生成episodes或script字段'));
     assert.ok(prompt.includes('场次、时空与原声始终直接核对originalScript'));
     assert.equal(prompt.includes('analysis、episodes、script 是同一范围的辅助输出'), false);
@@ -58,13 +58,27 @@ test('built-in and uploaded Skill generation, audit and repair keep the outline 
     const repair = makeRepairPrompt('甲走进会议室。', {}, { context });
     for (const prompt of [system, audit]) {
       assert.match(prompt, /顶层(?:只输出|仅)\s*outline、storyboard、assets/u);
-      assert.match(prompt, /生成块 \| 预计时长 \| 场景 \| 剧情内容与镜头重点/u);
+      assert.match(prompt, /生成块 \| 预计时长 \| 场景 \| 剧情概述/u);
       assert.match(prompt, /scene与outline/u);
     }
     assert.match(makeUserPrompt('甲走进会议室。', context), /分镜大纲/u);
     assert.match(repair, /同步更新.*scene与outline/u);
     assert.match(repair, /不再输出故事分析/u);
   }
+});
+
+test('outline summaries stay brief while detailed storyboard time slices remain in their production fields', () => {
+  const custom = { stageSkills: { storyboard: { name: '分镜.md', content: '按镜头拆解，保留完整对白和逐秒时间片。' } } };
+  for (const context of [{}, custom]) {
+    for (const prompt of [makeSystemPrompt(context), makeAuditSystemPrompt(context)]) {
+      assert.match(prompt, /outline.*一至两句简短中文/u);
+      assert.match(prompt, /最多160字/u);
+      assert.match(prompt, /预计总时长只放duration/u);
+      assert.match(prompt, /segments.*prompt/u);
+    }
+  }
+  assert.match(makeSystemPrompt({ stage: 'storyboard' }), /即使旧版确认内容较长或包含时间片，也必须原样继承/u);
+  assert.match(SYSTEM_PROMPT, /segments\.time 与 prompt 时间码逐项一致/u);
 });
 
 test('source text containing quotes, role delimiters and embedded commands remains one exact data string', () => {

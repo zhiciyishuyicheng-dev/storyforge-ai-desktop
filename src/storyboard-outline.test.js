@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStoryboardOutline, serializeStoryboardOutline, storyboardOutlineTemplate } from './storyboard-outline.js';
+import { briefOutlineContent, buildStoryboardOutline, serializeStoryboardOutline, storyboardOutlineTemplate } from './storyboard-outline.js';
 
 test('大纲行只取最终分镜，保持修复后的顺序、编号和原始时长', () => {
   const outline = buildStoryboardOutline({
@@ -23,16 +23,17 @@ test('大纲行只取最终分镜，保持修复后的顺序、编号和原始�
   assert.doesNotMatch(storyboardOutlineTemplate(outline), /旧场景|过期大纲/);
 });
 
-test('新生成摘要完整展示，安全转换粗体和换行', () => {
+test('摘要只显示一两句概述，保留原始内容用于后续分镜确认', () => {
   const content = `**成果被冒领。**\n${'周成海当面质问方案归属。'.repeat(100)}`;
   const outline = buildStoryboardOutline({ shots: [{ no: '01', duration: 13, scene: '会议室', outline: content }] });
   assert.equal(outline.rows[0].content, content);
   assert.equal(outline.rows[0].details, undefined);
   const html = storyboardOutlineTemplate(outline);
-  assert.match(html, /<strong>成果被冒领。<\/strong><br>/);
+  assert.match(html, /成果被冒领。 周成海当面质问方案归属。/);
+  assert.equal((html.match(/周成海当面质问方案归属。/g) || []).length, 1);
   assert.doesNotMatch(html, /\*\*|<details/);
   assert.equal((html.match(/<th scope="col">/g) || []).length, 4);
-  assert.match(html, /生成块<\/th><th scope="col">预计时长<\/th><th scope="col">场景<\/th><th scope="col">剧情内容与镜头重点/);
+  assert.match(html, /生成块<\/th><th scope="col">预计时长<\/th><th scope="col">场景<\/th><th scope="col">剧情概述/);
 });
 
 test('旧分镜从标题和镜头还原可读内容，不需要故事分析字段', () => {
@@ -46,7 +47,7 @@ test('旧分镜从标题和镜头还原可读内容，不需要故事分析字�
   assert.equal(outline.rows[1].content, '离开\n站在桌边。\n走出会议室。');
 });
 
-test('极长的旧镜头显示代表性内容，并保留完整内容供展开和复制', () => {
+test('极长的旧镜头使用已有标题显示和复制，完整原文仍保存在项目数据中', () => {
   const full = '桌面高度的侧面中近景。'.repeat(110);
   const outline = buildStoryboardOutline({ shots: [{ title: '停笔', segments: [{ visual: full }] }] });
   const row = outline.rows[0];
@@ -54,9 +55,10 @@ test('极长的旧镜头显示代表性内容，并保留完整内容供展开�
   assert.ok(row.content.length < 450);
   assert.equal(row.details, `停笔\n${full}`);
   const html = storyboardOutlineTemplate(outline);
-  assert.match(html, /<details class="storyboard-outline-details">/);
-  assert.ok(html.includes(full));
-  assert.ok(serializeStoryboardOutline(outline).includes(full));
+  assert.doesNotMatch(html, /<details|桌面高度/);
+  assert.match(html, />停笔<\/div>/);
+  assert.doesNotMatch(serializeStoryboardOutline(outline), /桌面高度/);
+  assert.equal(row.details, `停笔\n${full}`);
 });
 
 test('场景依次从分镜、素材编号、上传素材、可读场景编号解析', () => {
@@ -99,18 +101,18 @@ test('表格和复制文本处理所有模型字段，HTML和属性无法注入'
   const html = storyboardOutlineTemplate(outline);
   assert.doesNotMatch(html, /<img|<script|onerror="/);
   assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
-  assert.match(html, /<strong>&lt;img/);
+  assert.match(html, /<div>&lt;img/);
   assert.match(html, /&lt;script&gt;/);
   const markdown = serializeStoryboardOutline(outline);
   assert.doesNotMatch(markdown, /<img|<script|\*\*/);
 });
 
-test('复制大纲保留四列、行顺序和换行内容，转义表格分隔符', () => {
+test('复制大纲保留四列和行顺序，概述合并换行并转义表格分隔符', () => {
   const outline = buildStoryboardOutline({ shots: [{ no: '02', duration: 12, scene: '会议室', outline: '**质问。**陈浩 | 周成海\n门口特写。' }, { no: '01' }] });
   assert.equal(serializeStoryboardOutline(outline), [
-    '| 生成块 | 预计时长 | 场景 | 剧情内容与镜头重点 |',
+    '| 生成块 | 预计时长 | 场景 | 剧情概述 |',
     '| --- | ---: | --- | --- |',
-    '| 02 | 12秒 | 会议室 | 质问。陈浩 \\| 周成海<br>门口特写。 |',
+    '| 02 | 12秒 | 会议室 | 质问。陈浩 \\| 周成海 门口特写。 |',
     '| 01 | 待定 | 场景待定 | 剧情内容待补充 |',
   ].join('\n'));
 });
@@ -144,14 +146,38 @@ test('旧提示词画面标题和多行时间段可识别，嵌入的原有声�
   assert.equal(outline.rows[1].duration, null);
 });
 
-test('无法识别画面段落时完整保留旧提示词原文并标明来源，转义后安全显示和复制', () => {
+test('无法识别的旧提示词保留原文，展示和复制仅包含安全的简要内容', () => {
   const prompt = `<img src=x onerror="alert(1)">\n${'角色站在门前。'.repeat(160)}`;
   const outline = buildStoryboardOutline({ shots: [{ prompt }] });
   assert.equal(outline.rows[0].content, `旧版提示词原文：\n${prompt}`);
   assert.equal(outline.rows[0].details, undefined);
   assert.doesNotMatch(storyboardOutlineTemplate(outline), /<img/);
   assert.match(storyboardOutlineTemplate(outline), /&lt;img src=x/);
-  assert.ok(serializeStoryboardOutline(outline).includes('角色站在门前。'.repeat(160)));
+  assert.doesNotMatch(serializeStoryboardOutline(outline), /角色站在门前。角色站在门前。角色站在门前。/);
+  assert.equal(outline.rows[0].content, `旧版提示词原文：\n${prompt}`);
+});
+
+test('旧大纲时间片和配音指令不进入展示或复制，原始分镜和单块时长不变', () => {
+  const content = '署名被换\n0-4秒：周成海发现投影上的署名被改。\n4-9秒：陈浩向众人展示方案。【配音：陈浩：这个方案我已经梳理过了。】\n9-15秒：周成海放下笔，叫停会议。';
+  const shot = { no: '01', duration: 15, scene: '会议室（白天）', outline: content, prompt: content };
+  const before = structuredClone(shot);
+  const outline = buildStoryboardOutline({ shots: [shot] });
+  for (const view of [storyboardOutlineTemplate(outline), serializeStoryboardOutline(outline)]) {
+    assert.match(view, /署名被换/);
+    assert.match(view, /15秒/);
+    assert.doesNotMatch(view, /0-4秒|4-9秒|9-15秒|配音|已经梳理/);
+  }
+  assert.deepEqual(shot, before);
+  assert.equal(outline.rows[0].content, content);
+});
+
+test('时码格式兼容括号与分秒，概述最长160字且保留剧情中的数量和年份', () => {
+  assert.equal(briefOutlineContent({ content: '镜头1（00:00—00:02）：角色推开门。\n镜头2（00:02—00:04）：角色离开。' }), '角色推开门。 角色离开。');
+  assert.equal(briefOutlineContent({ content: '2020-2026年间，他一直守着旧仓库。' }), '2020-2026年间，他一直守着旧仓库。');
+  assert.equal(briefOutlineContent({ content: '她把2-3瓶水递给幸存者。' }), '她把2-3瓶水递给幸存者。');
+  assert.equal(briefOutlineContent({ content: '林帆说了1-2句话后离开。' }), '林帆说了1-2句话后离开。');
+  assert.equal(briefOutlineContent({ content: '[0-2] 角色推开门。\n2-4：角色离开。' }), '角色推开门。 角色离开。');
+  assert.ok(Array.from(briefOutlineContent({ content: '他站在门口等待'.repeat(60) })).length <= 160);
 });
 
 test('旧提示词只补缺失字段，绝不覆盖最终分镜或把无声明时间轴当成总时长', () => {

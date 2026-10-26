@@ -720,6 +720,15 @@ body { min-width:760px; }
 .auto-pipeline-notice > .running-task-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; flex-shrink:0; }
 
 /* The outline follows the four-column script handoff format. */
+.result-layout.outline-layout { grid-template-columns:minmax(0,1fr); gap:0; }
+.outline-layout > .result-main { min-width:0; }
+.outline-layout .result-title { flex-wrap:wrap; padding-bottom:12px; }
+.outline-result-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-left:auto; }
+.outline-result-status { color:#7b8380; font-size:12px; }
+.outline-result-actions button { padding:7px 10px; font-size:12px; }
+.outline-layout .result-body { padding-top:12px; }
+.outline-layout .stage-confirmation { margin-top:16px; padding:12px 14px; }
+.outline-layout .stage-confirmation .next-button { width:auto; margin:0; }
 .storyboard-outline { min-width:0; width:100%; color:#31343a; }
 .storyboard-outline-scroll { width:100%; overflow-x:auto; overscroll-behavior-x:contain; }
 .storyboard-outline-scroll:focus-visible { outline:2px solid #9b83d0; outline-offset:2px; }
@@ -729,7 +738,7 @@ body { min-width:760px; }
 .storyboard-outline-table .outline-scene { width:19%; }
 .storyboard-outline-table .outline-content { width:60%; }
 .storyboard-outline-caption { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
-.storyboard-outline-table th,.storyboard-outline-table td { padding:14px 10px; border:0; border-bottom:1px solid #e2e4e8; background:transparent; color:inherit; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+.storyboard-outline-table th,.storyboard-outline-table td { padding:10px; border:0; border-bottom:1px solid #e2e4e8; background:transparent; color:inherit; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
 .storyboard-outline-table thead th { padding-top:10px; padding-bottom:10px; font-weight:600; border-bottom-color:#cdd1d6; }
 .storyboard-outline-table thead th:nth-child(2),.storyboard-outline-table .outline-duration-cell { text-align:right; }
 .storyboard-outline-table tbody th { font-weight:400; font-variant-numeric:tabular-nums; }
