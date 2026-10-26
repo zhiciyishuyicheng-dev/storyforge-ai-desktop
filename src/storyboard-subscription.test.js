@@ -1,3 +1,5 @@
+import * as skillHistory from './generation-skill-history.js';
+import * as outlineUI from './storyboard-outline.js';
 import * as comfyUI from './comfy-video-ui.js';
 import * as h3 from './h3-references.js';
 import test from 'node:test';
@@ -22,6 +24,8 @@ function harness(api = {}) {
   const storage = new Map();
   const intervals = new Map();
   const context = vm.createContext({
+    ...skillHistory,
+    ...outlineUI,
     ...durations, ...references, ...generation, ...workflowProgress, ...comfyUI, ...h3,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { storyforgeAI: api, setTimeout: () => 1, setInterval: callback => { const id = Symbol(); intervals.set(id, callback); return id; }, clearInterval: id => intervals.delete(id) },
@@ -84,7 +88,7 @@ test('可用模型及思考强度来自账号，切换模型展示其真实支�
   assert.equal(h.run('storyboardGenerationTemplate()'), '');
 });
 
-test('GPT 分析分镜不要求 DeepSeek 密钥或订阅生图能力，锁定 Skill 和思考强度', async () => {
+test('GPT 大纲分镜不要求 DeepSeek 密钥或订阅生图能力，锁定 Skill 和思考强度', async () => {
   let sent;
   const h = harness({ getCodexTextStatus: async () => ready(), generateWorkflow: async (_script, options) => { sent = structuredClone(options); return { data: data(), model: options.model, reasoningEffort: options.reasoningEffort }; } });
   selectSubscription(h, 'xhigh');
@@ -98,9 +102,31 @@ test('GPT 分析分镜不要求 DeepSeek 密钥或订阅生图能力，锁定 Sk
   assert.equal(h.run('project.aiGeneration.provider'), 'codex-subscription');
   assert.equal(h.run('project.aiGeneration.reasoningEffort'), 'xhigh');
   assert.equal(h.run('Boolean(globalThis.deepseekSettingsOpened)'), false);
-  assert.match(h.run('project.outputs.analysis.body'), /GPT 订阅 · test-gpt-a/);
-  assert.doesNotMatch(h.run('project.outputs.analysis.body'), /DeepSeek/);
+  assert.match(h.run('project.outputs.analysis.subtitle'), /模型：test-gpt-a · 思考 xhigh/);
+  assert.doesNotMatch(h.run('project.outputs.analysis.subtitle'), /DeepSeek/);
+  assert.equal(h.run('project.outputs.analysis.title'), '分镜大纲');
+  assert.match(h.run('project.outputs.analysis.body'), /生成块|预计时长|剧情内容与镜头重点/);
   assert.match(h.run('workflowProgressTemplate()'), /GPT 订阅 · test-gpt-a · 已启用 · xhigh/);
+});
+
+test('GPT 新响应直接交付分镜大纲，不需要故事分析字段', async () => {
+  const result = data();
+  delete result.analysis;
+  result.outline = { title: '分镜大纲' };
+  result.storyboard.shots[0].scene = '书房';
+  result.storyboard.shots[0].outline = '发现新的线索。近景跟随阿宁翻开信纸，停在落款。';
+  const h = harness({ getCodexTextStatus: async () => ready(), generateWorkflow: async () => ({ data: result, model: 'test-gpt-a' }) });
+  selectSubscription(h);
+  await h.run('startGeneration()');
+  assert.equal(h.run('project.workflowError'), '');
+  assert.equal(h.run('project.outputs.analysis.title'), '分镜大纲');
+  assert.deepEqual(h.snapshot('project.outputs.analysis.outline.rows.map(({no,duration,scene,content}) => ({no,duration,scene,content}))'), [
+    { no: '01', duration: 5, scene: '书房', content: result.storyboard.shots[0].outline },
+  ]);
+  assert.deepEqual(h.snapshot('project.completed'), ['analysis', 'storyboard']);
+  assert.match(h.run('project.outputs.analysis.subtitle'), /模型：test-gpt-a/);
+  assert.doesNotMatch(h.run('project.outputs.analysis.body'), /故事定位|主要人物|核心卖点/);
+  assert.equal(h.run('project.outputs.storyboard.prompts[0]'), result.storyboard.shots[0].prompt);
 });
 
 test('未指定 GPT 模型时使用账号默认模型与默认强度，并保留在项目中', async () => {

@@ -1,3 +1,5 @@
+import * as skillHistory from './generation-skill-history.js';
+import * as outlineUI from './storyboard-outline.js';
 import * as comfyUI from './comfy-video-ui.js';
 import * as h3 from './h3-references.js';
 import test from 'node:test';
@@ -15,6 +17,8 @@ const renderer = source.slice(0, source.lastIndexOf('\nrender();')).replace(/^im
 function harness(api = {}) {
   const storage = new Map(), calls = [];
   const context = vm.createContext({
+    ...skillHistory,
+    ...outlineUI,
     ...durations, ...references, ...generation, ...workflowProgress, ...comfyUI, ...h3, structuredClone,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { storyforgeAI: {

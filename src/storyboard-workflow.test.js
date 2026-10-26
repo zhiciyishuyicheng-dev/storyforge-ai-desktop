@@ -1,3 +1,5 @@
+import * as skillHistory from './generation-skill-history.js';
+import * as outlineUI from './storyboard-outline.js';
 import * as comfyUI from './comfy-video-ui.js';
 import * as h3 from './h3-references.js';
 import test from 'node:test';
@@ -16,6 +18,8 @@ function harness(api = {}) {
   const storage = new Map();
   const intervals = new Map();
   const context = vm.createContext({
+    ...skillHistory,
+    ...outlineUI,
     ...durations,
     ...references,
     ...generation,
@@ -259,10 +263,107 @@ test('制作流程仅保留四步，编号、按钮与进度一致', () => {
   assert.match(h.run('appTemplate()'), /制作流程<\/span><b>50%<\/b>/);
 });
 
-test('生成响应只需故事分析、分镜与素材，不再生成两个已删除的结果', () => {
+test('分镜大纲响应无需故事分析，旧故事分析响应仍可兼容', () => {
   const h = harness();
   h.context.data = fixture();
   assert.deepEqual(h.snapshot('Object.keys(renderAIWorkflow(data))'), ['analysis', 'storyboard', 'assets']);
+  h.run('delete data.analysis; data.outline = {title: "分镜大纲"}; data.storyboard.shots[0].scene = "书房"; data.storyboard.shots[0].outline = "信中出现线索。近景呈现阿宁握紧信纸，目光停在落款。";');
+  const result = h.run('renderAIWorkflow(data)');
+  assert.equal(result.analysis.title, '分镜大纲');
+  assert.equal(result.analysis.outline.count, 1);
+  assert.match(result.analysis.body, /信中出现线索/);
+  assert.doesNotMatch(result.analysis.body, /故事定位|主要人物|核心卖点|视觉关键词|人物校验/);
+});
+
+test('第一步按最终生成块展示四列表格，审计修正后的顺序、场景和时长覆盖旧缓存', () => {
+  const h = harness();
+  const data = fixture();
+  delete data.analysis;
+  data.outline = { title: '分镜大纲' };
+  data.storyboard.shots = [
+    { ...data.storyboard.shots[0], no: '05', duration: 13, scene: '上线前碰头会·会议室', outline: '**成果被冒领。** 周成海发现接口图署名被改，近景呈现他停在笔帽上的手。' },
+    { ...data.storyboard.shots[0], no: '09', duration: 12, scene: '会议室', outline: '**被迫接受安排。** 零星掌声带动众人，周成海始终没有动作。' },
+  ];
+  h.context.data = data;
+  h.run('project.outputs = renderAIWorkflow(data); project.activeStep = "analysis"; project.outputs.analysis.title = "旧故事分析"; project.outputs.analysis.body = "不应显示的旧分析卡片"; project.outputs.analysis.outline.rows.reverse();');
+  let html = h.run('outputContentTemplate()');
+  for (const label of ['分镜大纲', '生成块', '预计时长', '场景', '剧情内容与镜头重点']) assert.match(html, new RegExp(label));
+  assert.doesNotMatch(html, /旧故事分析|不应显示的旧分析卡片|故事定位|主要人物|\*\*/);
+  assert.match(html, /<strong>成果被冒领。<\/strong>/);
+  assert.match(html, /2 个生成块 · 预计总时长 25 秒/);
+  assert.ok(html.indexOf('成果被冒领') < html.indexOf('被迫接受安排'));
+  assert.deepEqual(h.snapshot('currentStoryboardOutline().rows.map(({no,duration,scene}) => ({no,duration,scene}))'), [
+    { no: '05', duration: 13, scene: '上线前碰头会·会议室' }, { no: '09', duration: 12, scene: '会议室' },
+  ]);
+  h.run('project.outputs.storyboard.shots = [project.outputs.storyboard.shots[1]]; project.outputs.storyboard.shots[0] = {...project.outputs.storyboard.shots[0], no:"02",duration:8,scene:"走廊",outline:"离开会议室。镜头跟随周成海走进走廊。"};');
+  html = h.run('outputContentTemplate()');
+  assert.match(html, /1 个生成块 · 预计总时长 8 秒/);
+  assert.match(html, /走廊/);
+  assert.doesNotMatch(html, /成果被冒领|被迫接受安排|上线前碰头会/);
+  assert.deepEqual(h.snapshot('currentStoryboardOutline().rows.map(({no,duration,scene}) => ({no,duration,scene}))'), [{ no: '02', duration: 8, scene: '走廊' }]);
+});
+
+test('清空第一步不从分镜重新创建结果，清空第二步保留已有大纲', () => {
+  const h = harness();
+  const data = fixture();
+  data.storyboard.shots[0].scene = '书房';
+  data.storyboard.shots[0].outline = '读信得知线索。镜头停在阿宁收紧的指尖。';
+  h.context.data = data;
+  h.run('project.outputs = renderAIWorkflow(data); project.activeStep = "analysis";');
+  const before = h.snapshot('currentStoryboardOutline()');
+  h.run('delete project.outputs.storyboard; project.completed = ["analysis"];');
+  assert.deepEqual(h.snapshot('currentStoryboardOutline()'), before);
+  assert.match(h.run('outputContentTemplate()'), /读信得知线索/);
+  h.run('project.outputs = renderAIWorkflow(data); delete project.outputs.analysis; project.activeStep = "analysis"; project.completed = ["storyboard"];');
+  assert.match(h.run('outputContentTemplate()'), /准备好开始创作了吗/);
+  assert.doesNotMatch(h.run('outputContentTemplate()'), /<table|读信得知线索/);
+  h.run('copyText = () => { throw new Error("清空后不应复制隐藏大纲"); }; copyOutput();');
+  assert.equal(h.run('lastToast'), '当前还没有生成结果');
+  assert.equal(h.run('Boolean(project.outputs.analysis)'), false);
+});
+
+test('复制和导出第一步使用同一份最终大纲，不受旧 HTML 或页面展开状态影响', () => {
+  let copied = '';
+  let exported;
+  const h = harness();
+  const data = fixture();
+  data.storyboard.shots[0].scene = '书房';
+  data.storyboard.shots[0].outline = '得到线索。近景看到阿宁读完信后抬头。';
+  h.context.data = data;
+  h.context.captureCopy = (value) => { copied = value; };
+  h.context.Blob = class { constructor(parts) { exported = JSON.parse(parts.join('')); } };
+  h.context.URL = { createObjectURL: () => 'blob:export', revokeObjectURL: () => {} };
+  h.context.document.createElement = () => ({ click() {} });
+  h.run('project.outputs = renderAIWorkflow(data); project.activeStep = "analysis"; project.outputs.analysis.body = "旧分析缓存"; project.outputs.storyboard.shots[0].duration = 11; copyText = captureCopy; copyOutput(); exportProject();');
+  assert.match(copied, /\| 生成块 \| 预计时长 \| 场景 \| 剧情内容与镜头重点 \|/);
+  assert.match(copied, /\| 01 \| 11秒 \| 书房 \| 得到线索/);
+  assert.doesNotMatch(copied, /旧分析缓存|人物校验|审计结果/);
+  assert.equal(exported.outputs.analysis.title, '分镜大纲');
+  assert.equal(exported.outputs.analysis.outline.rows[0].duration, 11);
+  assert.equal(exported.outputs.analysis.outline.rows[0].scene, '书房');
+  assert.match(exported.outputs.analysis.body, /得到线索/);
+  assert.doesNotMatch(exported.outputs.analysis.body, /旧分析缓存/);
+  assert.equal(exported.outputs.storyboard.shots[0].prompt, data.storyboard.shots[0].prompt);
+  assert.equal(h.run('project.outputs.analysis.body'), '旧分析缓存');
+});
+
+test('旧项目的分析卡片迁移成已有分镜大纲，缺失时长与场景明确标为待定', () => {
+  const h = harness();
+  h.context.saved = {
+    script: '原文', activeStep: 'analysis', completed: ['analysis', 'storyboard'],
+    outputs: {
+      analysis: { title: '故事结构分析', body: '旧故事定位与人物校验' },
+      storyboard: { shots: [{ no: '03', title: '查看信纸', segments: [{ visual: '阿宁翻开信纸，目光停在落款。' }], prompt: '保留的正式提示词' }] },
+    },
+  };
+  h.run('project = normalizeProject(saved)');
+  const html = h.run('outputContentTemplate()');
+  assert.equal(h.run('project.outputs.analysis.title'), '分镜大纲');
+  assert.match(html, /阿宁翻开信纸/);
+  assert.match(html, /场景待定/);
+  assert.match(html, /预计总时长 时长待定/);
+  assert.doesNotMatch(html, /旧故事定位与人物校验|故事结构分析|5秒/);
+  assert.equal(h.run('project.outputs.storyboard.shots[0].prompt'), '保留的正式提示词');
 });
 
 test('旧项目移除两个步骤并迁移选中项，保留已确认分镜和本地图片视频', () => {
@@ -294,7 +395,7 @@ test('旧项目移除两个步骤并迁移选中项，保留已确认分镜和�
   }
 });
 
-test('旧项目尚无分镜时回到故事分析，导入项目也执行相同迁移', () => {
+test('旧项目尚无分镜时回到分镜大纲，导入项目也执行相同迁移', () => {
   const h = harness();
   const incoming = { schemaVersion: 5, title: '旧项目', script: '锁定原文', activeStep: 'script', completed: ['analysis', 'episodes'], outputs: { analysis: { body: '原分析' }, episodes: { body: '旧大纲' }, script: { body: '旧剧本' } } };
   h.context.incoming = incoming;
@@ -347,7 +448,7 @@ test('已审计输出保存版本与真实回炉次数，正文不混入审计�
   assert.doesNotMatch(output.body, /第一集|统一附加词/);
 });
 
-test('Skill 无人物的空镜按实际资产呈现，旧项目仍要求人物结构', () => {
+test('无人物的空镜按实际资产呈现，不依赖故事分析人物结构', () => {
   const h = harness();
   const data = fixture();
   data.analysis.characters = [];
@@ -360,7 +461,11 @@ test('Skill 无人物的空镜按实际资产呈现，旧项目仍要求人物�
   assert.equal(output.storyboard.shots[0].uploads.length, 0);
   assert.doesNotMatch(output.storyboard.prompts[0], /人物[：:]/);
   delete data.storyboard.skillVersion;
-  assert.throws(() => h.run('renderAIWorkflow(data)'), /数据不完整/);
+  delete data.analysis;
+  const legacyOutput = h.run('renderAIWorkflow(data)');
+  assert.equal(legacyOutput.analysis.title, '分镜大纲');
+  assert.equal(legacyOutput.assets.promptItems[0].name, '山谷');
+  assert.match(legacyOutput.analysis.body, /清晨云雾流经山谷/);
 });
 
 test('内部声音来源、覆盖与承接记录保存独立副本且不进入正式正文', () => {
@@ -480,7 +585,7 @@ test('忽略审计的对象、数字或空标题使用默认值，各阶段输�
     data.analysis.time = data.storyboard.time = 500;
     h.context.data = data;
     h.run('project.outputs = renderAIWorkflow(data)');
-    assert.equal(h.run('project.outputs.analysis.title'), '故事结构分析');
+    assert.equal(h.run('project.outputs.analysis.title'), '分镜大纲');
     assert.equal(h.run('project.outputs.storyboard.title'), 'Skill v2.1 分镜提示词');
     for (const step of ['analysis', 'storyboard', 'assets']) {
       h.context.step = step;
@@ -493,7 +598,7 @@ test('忽略审计的对象、数字或空标题使用默认值，各阶段输�
   valid.analysis.title = '用户故事分析';
   valid.storyboard.title = '用户分镜标题';
   h.context.data = valid;
-  assert.equal(h.run('renderAIWorkflow(data).analysis.title'), '用户故事分析');
+  assert.equal(h.run('renderAIWorkflow(data).analysis.title'), '分镜大纲');
   assert.equal(h.run('renderAIWorkflow(data).storyboard.title'), '用户分镜标题');
 });
 
@@ -661,7 +766,7 @@ test('结果下方常驻四项进度面板，空闲时也可见且不显示旧�
   const html = h.run('appTemplate()');
   assert.ok(html.indexOf('id="workflowProgressPanel"') > html.indexOf('id="outputArea"'));
   assert.match(html, /01 提示词准备/);
-  assert.match(html, /02 分析 \/ 分镜生成/);
+  assert.match(html, /02 大纲 \/ 分镜生成/);
   assert.match(html, /03 模型思考/);
   assert.match(html, /04 独立审计 · 60 项/);
   assert.match(html, /等待开始生成分镜/);
@@ -746,7 +851,7 @@ test('一键全流程默认关闭且仅接受布尔 true，开关和主按钮保
   }
   assert.equal(h.run('normalizeProject({autoRunToVideo:true}).autoRunToVideo'), true);
   assert.match(h.run('appTemplate()'), /一键跑完全流程/);
-  assert.match(h.run('appTemplate()'), /从故事分析自动完成参考图，再批量生成全部视频/);
+  assert.match(h.run('appTemplate()'), /从分镜大纲自动完成参考图，再批量生成全部视频/);
   assert.doesNotMatch(h.run('appTemplate()'), /id="autoRunToVideo"[^>]*checked/);
   h.run('project.autoRunToVideo = true');
   for (const step of ['analysis', 'storyboard', 'assets', 'video']) {
@@ -1226,7 +1331,7 @@ test('第三步重新生成仅追加全部参考图版本，即使自动开关�
   assert.equal(h.run('project.completed.includes("video")'), true);
 });
 
-test('关闭自动开关时第三步主按钮只补缺图，不进入故事分析', async () => {
+test('关闭自动开关时第三步主按钮只补缺图，不进入大纲分镜生成', async () => {
   let workflowCalls = 0;
   const requests = [];
   const h = harness({

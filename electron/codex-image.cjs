@@ -157,7 +157,7 @@ class AppServer extends EventEmitter {
   }
 
   async initialize() {
-    await this.request('initialize', { clientInfo: { name: 'storyforge_desktop', title: 'StoryForge AI', version: APP_VERSION } });
+    await this.request('initialize', { clientInfo: { name: 'storyforge_desktop', title: 'XStudio', version: APP_VERSION } });
     this.write({ method: 'initialized', params: {} });
   }
 

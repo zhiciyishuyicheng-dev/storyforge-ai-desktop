@@ -22,14 +22,14 @@ const SKILLS = {
 
 function candidate() {
   return {
-    analysis: { title: '信纸', characters: [{ name: '阿宁' }], sellingPoints: ['看信的悬念'], visualKeywords: ['书房'] },
+    outline: { title: '分镜大纲' },
     assets: {
       characters: [{ name: '阿宁', fileName: '阿宁.png', prompt: '阿宁的水彩人物参考图。' }],
       scenes: [{ name: '书房', fileName: '书房.png', prompt: '书房的水彩场景参考图。' }],
       groups: [], props: [], characterChecklist: [{ name: '阿宁', requiresReferenceImage: true }], characterDifferenceMatrix: [{ name: '阿宁', faceCode: 'C01' }],
     },
     storyboard: {
-      shots: [{ no: '01', title: '看信', duration: 8, uploads: [{ ref: '@阿宁', asset: '阿宁' }, { ref: '@书房', asset: '书房' }],
+      shots: [{ no: '01', title: '看信', duration: 8, scene: '书房', outline: '看信的悬念。阿宁在书房里看向信纸，镜头观察她的神情。', uploads: [{ ref: '@阿宁', asset: '阿宁' }, { ref: '@书房', asset: '书房' }],
         segments: [{ time: '0-8秒', visual: '阿宁在书房里看信纸。' }],
         prompt: '8秒，水彩风。人物：@阿宁 （外观参考）；场景：@书房 （空间参考）。[0-8秒] 阿宁看信纸。' }],
       blockers: [],
@@ -140,7 +140,7 @@ test('GPT status uses the existing local Codex choice without an image-capabilit
   await assert.rejects(h.handlers.get('codex-text:get-status')(remote), /主窗口/);
 });
 
-test('GPT subscription runs analysis/storyboards and independent Skill audit with no DeepSeek API key', async () => {
+test('GPT subscription runs outline/storyboards and independent Skill audit with no DeepSeek API key', async () => {
   const h = mainHarness();
   const result = await h.run({ runId: 'gpt-run', autoRunToVideo: true });
   assert.equal(h.calls.deepseek.length, 0);
@@ -159,6 +159,10 @@ test('GPT subscription runs analysis/storyboards and independent Skill audit wit
     assert.equal(Object.hasOwn(call.options, 'maxTokens'), false);
   }
   assert.equal(result.data.storyboard.auditSummary.finalStatus, '全部通过');
+  assert.equal(Object.hasOwn(result.data, 'analysis'), false);
+  assert.equal(result.data.outline.title, '分镜大纲');
+  assert.equal(result.data.storyboard.shots[0].scene, '书房');
+  assert.match(result.data.storyboard.shots[0].outline, /看信的悬念/u);
   assert.equal(result.data.storyboard.verification.builtinSkillApplied, false);
   assert.equal(result.data.storyboard.verification.stageSkills.storyboard.name, SKILLS.storyboard.name);
   assert.equal(result.model, MODEL);

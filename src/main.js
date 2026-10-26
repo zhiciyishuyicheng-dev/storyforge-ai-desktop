@@ -1,10 +1,12 @@
 import './style.css';
 import { buildH3ReferenceRequest } from './h3-references.js';
-import { comfyVideoSettingsTemplate, readComfyVideoSettings } from './comfy-video-ui.js';
+import { bindModalBackdropDismiss, captureComfyVideoSettingsState, comfyVideoSettingsTemplate, readComfyVideoSettings, restoreComfyVideoSettingsState } from './comfy-video-ui.js';
 import { normalizeSeedanceDuration, resolveSeedanceDuration, resolveStoryboardDuration } from './seedance-duration.js';
 import { normalizeSeedanceGenerationMode, selectSeedanceGenerationIndexes } from './seedance-generation.js';
 import { buildSeedanceReferenceRequest, ensureStoryboardShot, extractAssetReferences, migrateNamedReferencePlan, namedReferenceKey, resolveStrictReferencePlan } from './seedance-references.js';
 import { createInitialWorkflowProgress, finishWorkflowProgress, formatProgressDuration, normalizeWorkflowProgress, summarizeWorkflowProgress } from './workflow-progress.js';
+import { buildStoryboardOutline, storyboardOutlineTemplate, serializeStoryboardOutline } from './storyboard-outline.js';
+import { rememberSkill, seedSkillHistory } from './generation-skill-history.js';
 
 const LEGACY_STORAGE_KEY = 'storyforge-project-v1';
 const LIBRARY_STORAGE_KEY = 'storyforge-project-library-v1';
@@ -48,7 +50,7 @@ const SEEDANCE_RESOLUTIONS = ['480p', '720p'];
 const SEEDANCE_DURATIONS = Array.from({ length: 12 }, (_value, index) => index + 4);
 
 const steps = [
-  { id: 'analysis', no: '01', label: '故事分析', icon: '⌘', sub: '主线与人物' },
+  { id: 'analysis', no: '01', label: '分镜大纲', icon: '⌘', sub: '剧情与镜头重点' },
   { id: 'storyboard', no: '02', label: '分镜脚本', icon: '▦', sub: '镜头与动作' },
   { id: 'assets', no: '03', label: '视觉素材', icon: '✦', sub: '角色与场景' },
   { id: 'video', no: '04', label: '视频生成', icon: '▶', sub: '分镜视频' },
@@ -101,6 +103,7 @@ let autoPipelineRun = null;
 let generationSkillImport = null;
 let generationSkillImportSequence = 0;
 let generationSkillPreview = null;
+let generationSkillHistorySelection = null;
 let clearResultRequest = null;
 
 function normalizeGenerationSkillDocument(value) {
@@ -254,7 +257,7 @@ function normalizeProject(saved) {
       && migrated.videoGeneration.generatedCount === migrated.videoGeneration.items.length ? 'complete' : 'pending';
   }
   if (migrated.outputs.video?.body?.includes('video-preview')) {
-    migrated.outputs.video = { title: 'Seedance 分镜视频', subtitle: '按第二步分镜逐条生成并保存 MP4', time: '数分钟 / 镜头', body: '' };
+    migrated.outputs.video = { title: videoOutputTitle(migrated.videoGeneration.provider === 'comfy' ? 'comfy' : 'seedance'), subtitle: '按第二步分镜逐条生成并保存 MP4', time: '数分钟 / 镜头', body: '' };
   }
   const promptItems = migrated.outputs?.assets?.promptItems;
   if (Array.isArray(promptItems)) {
@@ -278,6 +281,9 @@ function normalizeProject(saved) {
   if (migrated.workflowProgress?.status === 'running') {
     migrated.workflowProgress = finishWorkflowProgress(migrated.workflowProgress, 'stopped', '上次生成已中断', migrated.workflowProgress.updatedAt);
   }
+  if (migrated.outputs.analysis) {
+    migrated.outputs.analysis = makeStoryboardOutlineOutput(currentStoryboardOutline(migrated), migrated.outputs.analysis);
+  }
   if (Array.isArray(migrated.outputs.assets?.promptItems)) {
     const prompts = migrated.outputs.assets.promptItems;
     alignAssetGenerationItems(prompts, migrated);
@@ -295,7 +301,7 @@ function loadProjectLibrary() {
       const activeProjectId = projects.some((item) => item.id === savedLibrary.activeProjectId)
         ? savedLibrary.activeProjectId
         : projects[0].id;
-      return { schemaVersion: LIBRARY_SCHEMA_VERSION, activeProjectId, projects };
+      return { schemaVersion: LIBRARY_SCHEMA_VERSION, activeProjectId, projects, skillHistory: seedSkillHistory(savedLibrary.skillHistory, projects) };
     }
   }
   catch { /* Try the legacy single-project storage below. */ }
@@ -305,7 +311,7 @@ function loadProjectLibrary() {
     const legacyProject = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY));
     firstProject = normalizeProject(legacyProject);
   } catch { firstProject = createProject(); }
-  const library = { schemaVersion: LIBRARY_SCHEMA_VERSION, activeProjectId: firstProject.id, projects: [firstProject] };
+  const library = { schemaVersion: LIBRARY_SCHEMA_VERSION, activeProjectId: firstProject.id, projects: [firstProject], skillHistory: seedSkillHistory([], [firstProject]) };
   localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(library));
   return library;
 }
@@ -324,6 +330,7 @@ function saveProject() {
   if (index >= 0) projectLibrary.projects[index] = project;
   else projectLibrary.projects.push(project);
   projectLibrary.activeProjectId = project.id;
+  projectLibrary.skillHistory = seedSkillHistory(projectLibrary.skillHistory, projectLibrary.projects);
   saveProjectLibrary();
 }
 
@@ -381,13 +388,15 @@ function imageQualityLabel(value) {
   return OPENAI_IMAGE_QUALITIES.find((item) => item.id === value)?.label || value;
 }
 
-function seedanceModelLabel(modelId = currentVideoSettings().model) {
-  if (/ref2va/i.test(modelId) || (activeVideoProvider() === 'comfy' && !modelId)) return 'MiniMax H3 · Ref2VA';
+function seedanceModelLabel(modelId = currentVideoSettings().model, provider = activeVideoProvider()) {
+  if (provider === 'comfy') return 'MiniMax H3 · Ref2VA';
   return SEEDANCE_MODELS.find((item) => item.id === modelId)?.label || 'Seedance 2.0';
 }
 
 function activeVideoProvider() { return project.videoGeneration?.provider === 'comfy' ? 'comfy' : 'seedance'; }
 function currentVideoSettings() { return activeVideoProvider() === 'comfy' ? comfyVideoStatus : seedanceStatus; }
+function videoServiceLabel(provider = activeVideoProvider()) { return provider === 'comfy' ? 'MiniMax H3' : 'Seedance'; }
+function videoOutputTitle(provider = activeVideoProvider()) { return `${videoServiceLabel(provider)} 分镜视频`; }
 
 function currentIndex() { return steps.findIndex((step) => step.id === project.activeStep); }
 
@@ -493,7 +502,7 @@ function storyboardGenerationControlsTemplate() {
 }
 
 function storyboardGenerationTemplate() {
-  return ['analysis', 'storyboard'].includes(project.activeStep) ? `<section class="storyboard-generation-controls" id="storyboardGenerationControls" aria-label="故事分析与分镜生成设置">${storyboardGenerationControlsTemplate()}</section>` : '';
+  return ['analysis', 'storyboard'].includes(project.activeStep) ? `<section class="storyboard-generation-controls" id="storyboardGenerationControls" aria-label="分镜大纲与分镜脚本生成设置">${storyboardGenerationControlsTemplate()}</section>` : '';
 }
 
 function codexTextSettingsDetails() {
@@ -625,7 +634,60 @@ function generationSkillTemplate() {
   const importing = generationSkillImport?.ownerProject === project && generationSkillImport.stage === stage;
   const label = stage === 'storyboard' ? '分镜 Skill' : '资产 Skill';
   const help = stage === 'assets' ? '上传后，下次实际 GPT 生图立即采用，已有提示词和图片会保留。' : '替换或移除只影响下次生成，已有分镜和图片会保留。';
-  return `<section class="generation-skill-card" aria-label="${label}" title="${help}"><div class="generation-skill-copy"><div><b>${label}</b><span class="generation-skill-state ${doc ? 'enabled' : ''}">${importing ? '正在读取文件…' : doc ? '已启用' : '未上传'}</span></div><p title="${doc ? esc(`${doc.name} · 正文 ${doc.content.length.toLocaleString()} 字符`) : help}">${doc ? `${esc(doc.name)} · 正文 ${doc.content.length.toLocaleString()} 字符` : stage === 'storyboard' ? '默认使用内置 v2.1' : '可上传本阶段生成要求'}</p></div><div class="generation-skill-actions"><button class="outline-button" data-import-generation-skill="${stage}" ${project.running || importing ? 'disabled' : ''}>${importing ? '正在读取…' : doc ? '替换 Skill' : '上传 Skill'}</button>${doc ? `<button class="outline-button" data-preview-generation-skill="${stage}" ${project.running ? 'disabled' : ''}>预览</button><button class="outline-button" data-remove-generation-skill="${stage}" ${project.running ? 'disabled' : ''}>移除</button>` : ''}</div></section>`;
+  return `<section class="generation-skill-card" aria-label="${label}" title="${help}"><div class="generation-skill-copy"><div><b>${label}</b><span class="generation-skill-state ${doc ? 'enabled' : ''}">${importing ? '正在读取文件…' : doc ? '已启用' : '未上传'}</span></div><p title="${doc ? esc(`${doc.name} · 正文 ${doc.content.length.toLocaleString()} 字符`) : help}">${doc ? `${esc(doc.name)} · 正文 ${doc.content.length.toLocaleString()} 字符` : stage === 'storyboard' ? '默认使用内置 v2.1' : '可上传本阶段生成要求'}</p></div><div class="generation-skill-actions"><button class="outline-button" data-reuse-generation-skill="${stage}" ${project.running || importing ? 'disabled' : ''}>复用历史 Skill</button><button class="outline-button" data-import-generation-skill="${stage}" ${project.running || importing ? 'disabled' : ''}>${importing ? '正在读取…' : doc ? '替换 Skill' : '上传 Skill'}</button>${doc ? `<button class="outline-button" data-preview-generation-skill="${stage}" ${project.running ? 'disabled' : ''}>预览</button><button class="outline-button" data-remove-generation-skill="${stage}" ${project.running ? 'disabled' : ''}>移除</button>` : ''}</div></section>`;
+}
+
+function generationSkillHistoryTemplate() {
+  const selection = generationSkillHistorySelection;
+  if (!selection || selection.ownerProject !== project) return '';
+  const label = selection.stage === 'storyboard' ? '分镜 Skill' : '资产 Skill';
+  const entries = (projectLibrary.skillHistory || []).filter((entry) => entry.stage === selection.stage);
+  const selected = entries.find((entry) => entry.id === selection.selectedId);
+  return `<div class="modal-backdrop" id="generationSkillHistoryModal"><div class="settings-modal generation-skill-preview-modal generation-skill-history-modal" role="dialog" aria-modal="true" aria-labelledby="generationSkillHistoryTitle"><div class="modal-head"><div><span class="section-kicker">SKILL HISTORY</span><h2 id="generationSkillHistoryTitle">复用历史${label}</h2></div><button id="closeGenerationSkillHistory" aria-label="关闭历史 Skill">×</button></div>${entries.length ? `<label class="skill-history-picker" for="generationSkillHistorySelect">选择历史${label}<select id="generationSkillHistorySelect">${entries.map((entry) => `<option value="${esc(entry.id)}" ${entry.id === selection.selectedId ? 'selected' : ''}>${esc(entry.doc.name)} · ${entry.doc.content.length.toLocaleString()} 字符 · ${esc(new Date(entry.usedAt).toLocaleString('zh-CN'))}</option>`).join('')}</select></label>${selected ? `<p>${esc(selected.doc.name)} · 正文 ${selected.doc.content.length.toLocaleString()} 字符</p><pre aria-label="历史 Skill 全文">${esc(selected.doc.content)}</pre>` : ''}<small>应用后用于当前项目下次生成，已有成果会保留。历史按分镜和资产分别保存。</small>` : '<p class="skill-history-empty">暂无历史 Skill。上传一次后，即可在其他项目中选择复用。</p>'}<div class="modal-actions"><button class="outline-button" id="cancelGenerationSkillHistory">取消</button><button class="primary-button" id="applyGenerationSkillHistory" ${!selected || project.running || generationSkillImport?.ownerProject === project ? 'disabled' : ''}>应用到当前项目</button></div></div></div>`;
+}
+
+function openGenerationSkillHistory(stage) {
+  if (!['storyboard', 'assets'].includes(stage)) return;
+  if (project.running) return showToast('生成进行中，完成后可复用 Skill');
+  if (generationSkillImport?.ownerProject === project) return showToast('正在读取 Skill，请稍后再选择');
+  projectLibrary.skillHistory = seedSkillHistory(projectLibrary.skillHistory, projectLibrary.projects);
+  const entries = projectLibrary.skillHistory.filter((entry) => entry.stage === stage);
+  const current = entries.find((entry) => entry.doc.content === project.generationSkills?.[stage]?.content);
+  generationSkillHistorySelection = { ownerProject: project, stage, selectedId: (current || entries[0])?.id || '' };
+  generationSkillPreview = null;
+  renderWithoutMovingPage();
+  document.querySelector('#generationSkillHistorySelect')?.focus?.();
+}
+
+function selectGenerationSkillHistory(id) {
+  const selection = generationSkillHistorySelection;
+  if (!selection || selection.ownerProject !== project || project.running) return;
+  if (!(projectLibrary.skillHistory || []).some((entry) => entry.id === id && entry.stage === selection.stage)) return;
+  selection.selectedId = id;
+  renderWithoutMovingPage();
+  document.querySelector('#generationSkillHistorySelect')?.focus?.();
+}
+
+function closeGenerationSkillHistory() {
+  const stage = generationSkillHistorySelection?.stage;
+  generationSkillHistorySelection = null;
+  renderWithoutMovingPage();
+  if (stage) document.querySelector(`[data-reuse-generation-skill="${stage}"]`)?.focus?.();
+}
+
+function applyGenerationSkillHistory() {
+  const selection = generationSkillHistorySelection;
+  if (!selection || selection.ownerProject !== project) return;
+  if (project.running) return showToast('生成进行中，完成后可复用 Skill');
+  if (generationSkillImport?.ownerProject === project) return showToast('正在读取 Skill，请稍后再选择');
+  const entry = (projectLibrary.skillHistory || []).find((item) => item.id === selection.selectedId && item.stage === selection.stage);
+  const doc = normalizeGenerationSkillDocument(entry?.doc);
+  if (!doc) return showToast('这份历史 Skill 不可用，请重新选择');
+  if (!saveGenerationSkill(selection.stage, doc)) return;
+  generationSkillImportSequence += 1;
+  generationSkillPreview = null;
+  closeGenerationSkillHistory();
+  showToast(`已复用${selection.stage === 'storyboard' ? '分镜' : '资产'} Skill：${doc.name}，下次生成生效`);
 }
 
 function generationSkillPreviewTemplate() {
@@ -638,11 +700,14 @@ function saveGenerationSkill(stage, doc, ownerProject = project) {
   if (!['storyboard', 'assets'].includes(stage) || ownerProject !== project || ownerProject.running) return false;
   const previous = ownerProject.generationSkills;
   const previousUpdatedAt = ownerProject.updatedAt;
+  const previousHistory = projectLibrary.skillHistory;
+  projectLibrary.skillHistory = rememberSkill(rememberSkill(previousHistory, stage, previous?.[stage]), stage, doc);
   ownerProject.generationSkills = { ...normalizeGenerationSkills(previous), [stage]: doc };
   try { saveProject(); return true; }
   catch (error) {
     ownerProject.generationSkills = previous;
     ownerProject.updatedAt = previousUpdatedAt;
+    projectLibrary.skillHistory = previousHistory;
     showToast(`保存 Skill 失败，已保留原设置：${cleanRemoteError(error, '本地存储不可用')}`);
     return false;
   }
@@ -705,10 +770,10 @@ function clearResultDialogTemplate() {
   if (!request || request.ownerProject !== project || request.stepId !== project.activeStep) return '';
   const step = steps.find(item => item.id === request.stepId);
   const descriptions = {
-    analysis: '将清空本步骤的故事分析，保留分镜、参考图和视频。',
-    storyboard: '将清空本步骤的分镜正文和审计记录，保留故事分析、参考图和已生成的视频。重新生成视频前需要先准备分镜。',
+    analysis: '将清空本步骤的分镜大纲，保留分镜、参考图和视频。',
+    storyboard: '将清空本步骤的分镜正文和审计记录，保留分镜大纲、参考图和已生成的视频。重新生成视频前需要先准备分镜。',
     assets: '将清空本步骤的图片关联和生成状态，保留素材名称与生图提示词，方便重新生成或上传图片。已生成的视频会保留。',
-    video: '将清空本步骤的视频关联和生成状态，保留故事分析、分镜和参考图。',
+    video: '将清空本步骤的视频关联和生成状态，保留分镜大纲、分镜和参考图。',
   };
   return `<div class="modal-backdrop" id="clearResultModal"><div class="settings-modal clear-result-modal" role="alertdialog" aria-modal="true" aria-labelledby="clearResultTitle" aria-describedby="clearResultDescription"><div class="modal-head"><div><span class="section-kicker">CLEAR CURRENT STEP</span><h2 id="clearResultTitle">清空“${step.no} ${step.label}”的结果？</h2></div><button id="closeClearResult" aria-label="取消清空">×</button></div><p id="clearResultDescription">${descriptions[request.stepId]}</p><p>原文、Skill 和模型设置会保留。其他步骤的结果不会清空，磁盘中的图片和视频也不会删除。</p><p class="clear-result-warning">此操作无法撤销。需要留档时，请先导出项目备份。</p><div class="modal-actions"><button class="outline-button" id="exportBeforeClear">导出项目备份</button><button class="outline-button" id="cancelClearResult">取消</button><button class="primary-button clear-result-confirm" id="confirmClearResult">确认清空当前步骤</button></div></div></div>`;
 }
@@ -782,11 +847,11 @@ function appTemplate() {
     ? (workflowRun?.ownerProject === project ? '生成 / 审计与自动修正中…' : runningGenerationStep() === 'assets' ? '正在生成参考图…' : '正在生成视频…')
     : project.autoRunToVideo === true ? '一键生成到视频' : project.activeStep === 'video'
       ? (project.outputs.video ? '重新生成视频' : '开始生成视频')
-      : project.activeStep === 'assets' ? '生成缺少的参考图' : (project.completed.length ? '重新生成分析与分镜' : '开始生成分镜');
+      : project.activeStep === 'assets' ? '生成缺少的参考图' : (project.completed.length ? '重新生成大纲与分镜' : '开始生成分镜');
   return `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brand"><img class="brand-mark" src="./studio.ico" alt="" /><span>AI Studio</span></div>
+        <div class="brand"><img class="brand-mark" src="./studio.ico" alt="" /><span>XStudio</span></div>
         <button class="new-project" id="newProject"><span>＋</span> 新建项目 <kbd>Ctrl N</kbd></button>
         <div class="side-label">我的项目 <span>${projectLibrary.projects.length}</span></div>
         <div class="project-list">
@@ -801,8 +866,8 @@ function appTemplate() {
           <div class="sidebar-editor-head"><div><span class="section-kicker">INPUT</span><h2>剧本入口</h2></div><span class="format-label">TXT · MD</span></div>
           <div class="script-input-wrap ${project.script ? 'has-content' : ''}"><textarea id="scriptInput" ${project.running ? 'disabled' : ''} placeholder="把小说改编后的剧本粘贴到这里...\n\n建议包含：集数、场景、人物和对白。${project.script ? '' : '\n\n还没有剧本？试试下方示例。'}">${esc(project.script)}</textarea><div class="textarea-footer"><span>${project.script.length ? `${project.script.length} 字` : '0 字'}</span><label class="upload-link" for="fileInput">↑ 导入文件</label><input type="file" id="fileInput" accept=".txt,.md" ${project.running ? 'disabled' : ''} hidden /></div></div>
           <div class="sidebar-input-actions"><button class="sample-link" id="useDemo" ${project.running ? 'disabled' : ''}>加载示例 <span>↗</span></button><button class="primary-button" id="startGenerate" ${project.running ? 'disabled' : ''}><span class="sparkle">✦</span> ${generateLabel} <span>→</span></button></div>
-          <label class="auto-pipeline-switch"><input id="autoRunToVideo" type="checkbox" role="switch" ${project.autoRunToVideo === true ? 'checked' : ''} ${project.running ? 'disabled' : ''}><span><b>一键跑完全流程</b><small>从故事分析自动完成参考图，再批量生成全部视频</small></span></label>
-          <p class="auto-flow-note">先分析故事并生成分镜，第三步用 GPT 订阅生图或上传参考图，第四步由 Seedance 生成视频</p>
+          <label class="auto-pipeline-switch"><input id="autoRunToVideo" type="checkbox" role="switch" ${project.autoRunToVideo === true ? 'checked' : ''} ${project.running ? 'disabled' : ''}><span><b>一键跑完全流程</b><small>从分镜大纲自动完成参考图，再批量生成全部视频</small></span></label>
+          <p class="auto-flow-note">先生成分镜大纲和分镜脚本，第三步用 GPT 订阅生图或上传参考图，第四步由 ${esc(videoServiceLabel())} 生成视频</p>
         </section>
         <div class="sidebar-bottom">
           <button class="account" id="openSettings"><div class="avatar">${project.storyboardGeneration?.provider === 'codex-subscription' ? 'G' : '深'}</div><div><b>${esc(storyboardProviderLabel())}</b><small>${esc(storyboardConnectionText())}</small></div><span class="settings">⚙</span></button>
@@ -816,13 +881,14 @@ function appTemplate() {
         <section class="output-card card"><div class="card-head output-head"><div><span class="section-kicker">OUTPUT</span><h2>生成结果</h2></div><div class="output-tools"><button class="small-button" id="clearOutput">清空当前步骤</button><button class="small-button" id="copyOutput">复制当前结果</button></div></div>${storyboardGenerationTemplate()}${generationSkillTemplate()}<div id="outputArea">${outputTemplate()}</div></section>
         <section class="workflow-progress-panel${project.activeStep === 'video' ? ' video-progress-panel' : ''}" id="workflowProgressPanel" aria-label="${project.activeStep === 'video' ? '视频分镜进度' : '分镜执行进度'}">${generationProgressTemplate()}</section>
       </main>
-      <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4.1 Flash</b><small>选择 DeepSeek 方式时，用于故事分析、分镜和视觉素材提示词；也可在结果区上方切换 GPT 订阅。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
+      <div class="modal-backdrop" id="settingsModal" hidden><div class="settings-modal"><div class="modal-head"><div><span class="section-kicker">MODEL SETTINGS</span><h2>DeepSeek 模型设置</h2></div><button id="closeSettings">×</button></div><div class="model-lock"><span>固定模型</span><b>DeepSeek V4.1 Flash</b><small>选择 DeepSeek 方式时，用于分镜大纲、分镜和视觉素材提示词；也可在结果区上方切换 GPT 订阅。</small></div><label class="key-field"><span>DeepSeek API Key</span><input id="deepseekKey" type="password" placeholder="sk-..." autocomplete="off"><small>密钥使用 Windows 本机加密保存，不会写入项目或安装包。</small></label><div class="modal-message" id="modelMessage"></div><div class="modal-actions"><button class="outline-button" id="testDeepSeek">测试连接</button><button class="primary-button" id="saveDeepSeek">保存设置</button></div><a class="key-help" href="https://platform.deepseek.com/api_keys" target="_blank">前往 DeepSeek 平台创建 API Key ↗</a></div></div>
       <div class="modal-backdrop" id="imageSettingsModal" hidden><div class="settings-modal image-settings-modal"><div class="modal-head"><div><span class="section-kicker">IMAGE MODEL SETTINGS</span><h2>第三步生图设置</h2></div><button id="closeImageSettings">×</button></div><div class="image-provider-switch" role="tablist" aria-label="生图渠道"><button class="${imageProviderDraft === 'seedream' ? 'active' : ''}" data-image-provider="seedream" role="tab" aria-selected="${imageProviderDraft === 'seedream'}">Seedream 5.0</button><button class="${imageProviderDraft === 'openai' ? 'active' : ''}" data-image-provider="openai" role="tab" aria-selected="${imageProviderDraft === 'openai'}">GPT Image 2</button></div><div class="provider-panel" data-provider-panel="seedream" ${imageProviderDraft === 'seedream' ? '' : 'hidden'}><div class="model-lock seedream-lock"><span>火山方舟生图</span><b>Seedream 5.0</b><small>逐张生成角色、场景和道具参考图，并保存到“文档/StoryForge/项目名/项目编号/视觉素材”。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedreamKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedreamStatus.configured ? '密钥已加密保存；留空可只修改模型和尺寸。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>图片模型</span><select id="seedreamModel">${SEEDREAM_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedreamStatus.model ? 'selected' : ''}>${item.label}${item.pricePerImage ? ` · ¥${item.pricePerImage.toFixed(2)}/张` : ' · 需账号单独开通'}</option>`).join('')}</select><small>正式版和 Lite 都需要在火山方舟单独开通。</small></label><label class="key-field"><span>输出尺寸</span><select id="seedreamSize"><option value="2K" ${seedreamStatus.size === '2K' ? 'selected' : ''}>2K（推荐）</option><option value="4K" ${seedreamStatus.size === '4K' ? 'selected' : ''}>4K</option></select></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedream 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div></div><div class="provider-panel" data-provider-panel="openai" ${imageProviderDraft === 'openai' ? '' : 'hidden'}><div class="model-lock openai-image-lock"><span>OpenAI 生图</span><b>GPT Image 2</b><small>按参考图提示词生成 PNG 图片。复杂提示词最多可能需要约两分钟。</small></div><label class="key-field"><span>OpenAI API Key</span><input id="openAIImageKey" type="password" placeholder="sk-..." autocomplete="off"><small>${openAIImageStatus.configured ? '密钥已加密保存；留空可只修改尺寸和质量。' : '密钥使用 Windows 本机加密保存，不会写入项目或安装包。'}</small></label><label class="key-field"><span>输出尺寸</span><select id="openAIImageSize">${OPENAI_IMAGE_SIZES.map((item) => `<option value="${item.id}" ${item.id === openAIImageStatus.size ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>图片质量</span><select id="openAIImageQuality">${OPENAI_IMAGE_QUALITIES.map((item) => `<option value="${item.id}" ${item.id === openAIImageStatus.quality ? 'selected' : ''}>${item.label}</option>`).join('')}</select><small>高质量耗时和费用更高；费用以 OpenAI 控制台为准。</small></label><div class="key-links"><a class="key-help" href="https://platform.openai.com/api-keys" target="_blank">创建 OpenAI API Key ↗</a><a class="key-help" href="https://platform.openai.com/settings/organization/general" target="_blank">组织与验证设置 ↗</a></div></div><div class="modal-message" id="imageMessage"></div><div class="modal-actions"><button class="outline-button" id="testImageProvider">测试连接（不生图）</button><button class="primary-button" id="saveImageProvider">保存并使用</button></div></div></div>
       <div class="modal-backdrop" id="seedanceSettingsModal" hidden><div class="settings-modal seedance-settings-modal"><div class="modal-head"><div><span class="section-kicker">VIDEO MODEL SETTINGS</span><h2>第四步视频设置</h2></div><button id="closeSeedanceSettings">×</button></div><label class="key-field"><span>视频生成服务</span><select id="seedanceVideoProvider"><option value="seedance">火山方舟 · Seedance 2.0</option><option value="comfy">仙宫云 GPU · H3 Ref2VA</option></select></label><div class="model-lock seedance-video-lock"><span>火山方舟视频生成</span><b>Seedance 2.0</b><small>每个镜头使用第二步分镜中的时长，生成 4 至 15 秒视频；按 @人物名、@场景名、@道具名自动匹配第三步同名图片。</small></div><label class="key-field"><span>火山方舟 API Key</span><input id="seedanceKey" type="password" placeholder="输入 ARK_API_KEY" autocomplete="off"><small>${seedanceStatus.configured ? (seedanceStatus.inheritedKey ? '当前复用 Seedream 的火山方舟密钥；留空即可继续使用。' : '密钥已加密保存；留空可只修改视频参数。') : '可复用 Seedream 的同一个火山方舟 API Key。'}</small></label><div class="seedance-setting-grid"><label class="key-field"><span>视频模型</span><select id="seedanceModel">${SEEDANCE_MODELS.map((item) => `<option value="${item.id}" ${item.id === seedanceStatus.model ? 'selected' : ''}>${item.label}</option>`).join('')}</select></label><label class="key-field"><span>画面比例</span><select id="seedanceRatio">${SEEDANCE_RATIOS.map((item) => `<option value="${item}" ${item === seedanceStatus.ratio ? 'selected' : ''}>${item}${item === '9:16' ? '（竖屏推荐）' : ''}</option>`).join('')}</select></label><label class="key-field"><span>分辨率</span><select id="seedanceResolution">${SEEDANCE_RESOLUTIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.resolution ? 'selected' : ''}>${item}</option>`).join('')}</select></label><label class="key-field"><span>缺省时长</span><select id="seedanceDuration">${SEEDANCE_DURATIONS.map((item) => `<option value="${item}" ${item === seedanceStatus.duration ? 'selected' : ''}>${item} 秒</option>`).join('')}</select><small>仅在分镜没有有效时长时使用。</small></label></div><div class="video-generation-mode-field"><span>生成方式</span><div class="video-generation-mode" role="tablist" aria-label="视频生成方式"><button class="${seedanceStatus.generationMode === 'confirm' ? '' : 'active'}" data-seedance-generation-mode="batch" role="tab" aria-selected="${seedanceStatus.generationMode !== 'confirm'}"><b>批量连续</b><small>一次确认，按顺序生成全部镜头</small></button><button class="${seedanceStatus.generationMode === 'confirm' ? 'active' : ''}" data-seedance-generation-mode="confirm" role="tab" aria-selected="${seedanceStatus.generationMode === 'confirm'}"><b>逐镜确认</b><small>每个镜头完成后暂停，确认后再生成下一个</small></button></div></div><label class="toggle-field"><input id="seedanceGenerateAudio" type="checkbox" ${seedanceStatus.generateAudio ? 'checked' : ''}><span><b>生成同步音频</b><small>让 Seedance 同时生成对白、人声、环境音和配乐。</small></span></label><div class="key-links"><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement" target="_blank">开通 Seedance 模型服务 ↗</a><a class="key-help" href="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?projectName=default" target="_blank">管理 API Key ↗</a></div><div class="modal-message" id="seedanceMessage"></div><div class="modal-actions"><button class="outline-button" id="testSeedance">测试连接（不生视频）</button><button class="primary-button" id="saveSeedance">保存设置</button></div></div></div>
       <div class="modal-backdrop" id="customAssetModal" hidden><div class="settings-modal custom-asset-modal"><div class="modal-head"><div><span class="section-kicker">CUSTOM REFERENCE</span><h2>${Number.isInteger(customAssetTargetShotIndex) ? `为镜头 ${String(customAssetTargetShotIndex + 1).padStart(2, '0')} 添加参考图` : '添加遗漏资源'}</h2></div><button id="closeCustomAsset">×</button></div><div class="model-lock local-custom-lock"><span>${Number.isInteger(customAssetTargetShotIndex) ? '第四步镜头素材' : '第三步本地素材'}</span><b>创建自定义上传项</b><small>${Number.isInteger(customAssetTargetShotIndex) ? '填写名称并选择图片后，会以 @素材名称添加到当前镜头并自动绑定。' : '适合补充主持人、医生、秘书、额外场景或遗漏道具。创建后立即选择本地参考图片。'}</small></div><label class="key-field"><span>资源名称</span><input id="customAssetName" type="text" placeholder="例如：主持人" autocomplete="off"></label><label class="key-field"><span>资源类型</span><select id="customAssetType"><option value="人物参考图">人物</option><option value="场景参考图">场景</option><option value="群像参考图">群像</option><option value="道具参考图">道具</option><option value="其他参考图">其他</option></select></label><div class="modal-message" id="customAssetMessage"></div><div class="modal-actions"><button class="outline-button" id="cancelCustomAsset">取消</button><button class="primary-button" id="createCustomAsset">创建并上传图片</button></div></div></div>
       ${comfyVideoSettingsTemplate(comfyVideoStatus)}${portraitCertificationModalTemplate()}
       ${codexImageSettingsTemplate()}${codexTextSettingsTemplate()}
       ${generationSkillPreviewTemplate()}
+      ${generationSkillHistoryTemplate()}
       ${clearResultDialogTemplate()}
       <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>`;
@@ -861,7 +927,7 @@ function focusGenerationStep(stepId, run) {
 function runningTaskNoticeTemplate() {
   const stage = runningGenerationStep();
   if (!stage || autoPipelineRun?.ownerProject === project) return '';
-  const label = stage === 'assets' ? '参考图生成' : stage === 'video' ? '视频生成' : '故事分析与分镜生成';
+  const label = stage === 'assets' ? '参考图生成' : stage === 'video' ? '视频生成' : '分镜大纲与分镜脚本生成';
   return `<section class="running-task-notice" role="status"><div><b>${label}正在后台进行</b><span>可以查看、复制其他步骤的结果；生成任务会继续。</span></div><div>${project.activeStep !== stage ? '<button class="outline-button" id="returnToRunningStage">返回生成页面</button>' : ''}<button class="outline-button" id="stopRunningTask">停止当前任务</button></div></section>`;
 }
 
@@ -1018,7 +1084,7 @@ function videoGenerationTemplate() {
     : certificationPending
       ? '完成方舟真人认证并填写 Asset ID 后，程序会自动重试当前镜头，并继续原来的批量任务。'
     : '可以“生成下一个镜头”，也可以“一键批量生成”；每张镜头卡仍可单独生成或重试。';
-  return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第四步 · ${activeVideoProvider() === 'comfy' ? '仙宫云 H3' : 'Seedance'} 分镜视频</h4><p>${esc(seedanceModelLabel(state.model || seedanceStatus.model))} · ${esc(state.ratio || seedanceStatus.ratio)} · ${esc(state.resolution || seedanceStatus.resolution)} · 支持逐镜与批量 · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="outline-button" id="generateNextVideo" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(nextButtonText)}</button><button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(batchButtonText)}</button></div></div><div class="seedance-video-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
+  return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第四步 · ${esc(videoOutputTitle())}</h4><p>${esc(seedanceModelLabel())} · ${esc(currentVideoSettings().ratio)} · ${esc(currentVideoSettings().resolution)} · 支持逐镜与批量 · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="outline-button" id="generateNextVideo" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(nextButtonText)}</button><button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(batchButtonText)}</button></div></div><div class="seedance-video-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
 }
 
 function storyboardShotDuration(index, prompt, fallback = seedanceStatus.duration) {
@@ -1063,24 +1129,46 @@ function outputTemplate() {
 function autoPipelineNoticeTemplate() {
   const state = project.autoPipeline;
   if (!state) return '';
-  const phases = { checking: '检查生成配置', storyboard: '故事分析与分镜', assets: '生成参考图', video: '批量生成视频' };
+  const phases = { checking: '检查生成配置', storyboard: '分镜大纲与分镜脚本', assets: '生成参考图', video: '批量生成视频' };
   const labels = { running: '全流程进行中', completed: '全流程已完成', failed: '全流程已暂停', stopped: '全流程已停止' };
   return `<section class="auto-pipeline-notice ${state.status}" role="status"><div><b>${labels[state.status] || '全流程状态'} · ${phases[state.phase] || ''}</b><span>${esc(state.error || (state.status === 'completed' ? '全部视频镜头已生成并保存。' : '自动衔接下一阶段，视频按批量连续生成；可自由查看其他步骤。'))}</span></div>${state.status === 'running' ? `<div class="running-task-actions">${runningGenerationStep() !== project.activeStep ? '<button class="outline-button" id="returnToRunningStage">返回生成页面</button>' : ''}<button class="outline-button" id="stopAutoPipeline">停止全流程</button></div>` : ''}</section>`;
 }
 
+function currentStoryboardOutline(owner = project) {
+  const storyboard = owner.outputs?.storyboard;
+  if (Array.isArray(storyboard?.shots)) return buildStoryboardOutline(storyboard, owner.outputs?.assets);
+  if (Array.isArray(storyboard?.prompts) && storyboard.prompts.length) {
+    return buildStoryboardOutline({ shots: storyboard.prompts.map((prompt, index) => ({ no: String(index + 1).padStart(2, '0'), duration: storyboard.durations?.[index], prompt })) }, owner.outputs?.assets);
+  }
+  const saved = owner.outputs?.analysis?.outline;
+  return saved && Array.isArray(saved.rows) ? saved : buildStoryboardOutline();
+}
+
+function storyboardOutlineSummary(outline) {
+  const duration = outline.unknownDurationCount ? outline.totalDuration ? `已知 ${outline.totalDuration} 秒，另有时长待定` : '时长待定' : `${outline.totalDuration} 秒`;
+  return `${outline.count} 个生成块 · 预计总时长 ${duration}`;
+}
+
+function makeStoryboardOutlineOutput(outline, previous = {}) {
+  return { ...previous, title: '分镜大纲', subtitle: `${storyboardOutlineSummary(outline)}${previous.generationInfo ? ` · ${previous.generationInfo}` : ''}`, time: '按分镜时长', outline, body: storyboardOutlineTemplate(outline) };
+}
+
 function outputContentTemplate() {
   const output = project.outputs[project.activeStep] || (project.activeStep === 'video' && (project.videoGeneration?.items?.length || project.outputs.storyboard?.prompts?.length)
-    ? { title: 'Seedance 分镜视频', subtitle: steps.filter(step => step.id !== 'video').every(step => project.completed.includes(step.id)) ? '本地参考图和分镜已经准备完成' : '逐镜生成、查看和切换视频版本', time: '按镜头生成', body: '' } : null);
+    ? { title: videoOutputTitle(), subtitle: steps.filter(step => step.id !== 'video').every(step => project.completed.includes(step.id)) ? '本地参考图和分镜已经准备完成' : '逐镜生成、查看和切换视频版本', time: '按镜头生成', body: '' } : null);
   if (project.activeStep === 'assets' && output) alignAssetGenerationItems(output.promptItems || []);
   const runningStep = runningGenerationStep();
   const workflowPending = project.running && workflowRun?.ownerProject === project && ['analysis', 'storyboard'].includes(project.activeStep);
   const viewingRunningStage = runningStep === project.activeStep || workflowPending;
   if (viewingRunningStage && !output) return `<div class="generating"><div class="generating-orb">✦</div><h3>${workflowPending ? '生成 / 审计与自动修正中…' : `正在生成${steps[currentIndex()].label}…`}</h3><p>${workflowPending ? '审计未通过时最多自动回炉一次；回炉后仍未通过将保留警告并继续下一步。' : runningStep === 'assets' ? '正在生成并保存参考图' : '正在生成并下载视频镜头'}</p><div class="generating-track"><i></i></div><small>请保持程序开启</small></div>`;
-  if (project.activeStep === 'video' && !output && steps.filter((step) => step.id !== 'video').every((step) => project.completed.includes(step.id))) return `<div class="video-ready"><div class="video-ready-icon">▶</div><span class="section-kicker">READY FOR SEEDANCE</span><h3>本地参考图和分镜已经准备完成</h3><p>Seedance 支持单独生成一个镜头或批量生成全部镜头，并将完成的视频保存到本机。</p><div class="video-ready-actions"><button class="outline-button" id="configureSeedance">视频设置</button><button class="next-button" id="generateVideo" ${project.running ? 'disabled' : ''}>进入视频生成 <span>→</span></button></div></div>`;
+  if (project.activeStep === 'video' && !output && steps.filter((step) => step.id !== 'video').every((step) => project.completed.includes(step.id))) return `<div class="video-ready"><div class="video-ready-icon">▶</div><span class="section-kicker">READY FOR ${activeVideoProvider() === 'comfy' ? 'MINIMAX H3' : 'SEEDANCE'}</span><h3>本地参考图和分镜已经准备完成</h3><p>${esc(videoServiceLabel())} 支持单独生成一个镜头或批量生成全部镜头，并将完成的视频保存到本机。</p><div class="video-ready-actions"><button class="outline-button" id="configureSeedance">视频设置</button><button class="next-button" id="generateVideo" ${project.running ? 'disabled' : ''}>进入视频生成 <span>→</span></button></div></div>`;
   if (!output && project.running) return '<div class="empty-output"><div class="empty-icon">✧</div><h3>此步骤暂时没有生成结果</h3><p>后台任务仍在进行，可以查看其他步骤或返回生成页面。</p></div>';
   if (!output) return `<div class="empty-output"><div class="empty-icon">✧</div><h3>准备好开始创作了吗？</h3><p>输入一段剧本，点击“开始生成”，你的短剧工作流会从这里展开。</p><button class="outline-button" id="emptyStart">使用示例开始 <span>→</span></button></div>`;
   const isAssets = project.activeStep === 'assets';
   const isVideo = project.activeStep === 'video';
+  const isOutline = project.activeStep === 'analysis';
+  const outlineOutput = isOutline ? makeStoryboardOutlineOutput(currentStoryboardOutline(), output) : output;
+  const resultTitle = isVideo ? videoOutputTitle() : outlineOutput.title;
   const stageComplete = project.completed.includes(project.activeStep);
   const partial = project.outputs.storyboard?.auditSummary?.finalStatus === '部分通过（存在阻塞）';
   const auditIgnored = project.outputs.storyboard?.auditSummary?.finalStatus === '审计未通过（已忽略）';
@@ -1089,26 +1177,22 @@ function outputContentTemplate() {
   const videoGenerationModeText = effectiveVideoGenerationMode() === 'confirm' ? '逐镜确认' : '批量连续';
   const pendingNotice = workflowPending ? '<div class="workflow-audit-progress" role="status"><b>生成 / 审计与自动修正中…</b><span>下方保留上次成果，新结果完成审计与最多一次修正后一次替换。</span></div>' : '';
   const partialNotice = partial && project.activeStep !== 'storyboard' ? '<div class="storyboard-partial-notice">本项目分镜仅部分通过，受阻内容尚未交付。请在第二步查看具体范围与缺少的信息；当前可用素材和视频仅对应已通过的独立生成块。</div>' : '';
-  const body = `${pendingNotice}${partialNotice}${isAssets ? assetGenerationTemplate(output) : ''}${isVideo ? videoGenerationTemplate() : ''}${output.body || ''}`;
-  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''} ${isVideo ? 'video-generation-layout' : ''}${auditIgnored && project.activeStep === 'storyboard' ? ' audit-ignored-result' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(output.title)}</h3><p>${esc(output.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>${isVideo ? '镜头时长' : '预计耗时'}</span><b>${isVideo ? esc(videoDurationText) : output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? `<div class="side-stat vertical"><span>分镜规范</span><b>${storyboardUsesCustomSkill() ? '用户 Skill' : storyboardUsesSkill21() ? 'Skill v2.1' : '即梦二点零'}</b><small>${storyboardUsesCustomSkill() ? esc(String(project.outputs.storyboard.auditSummary.skillName || '上传规范')) + '<br>按本次上传规范执行' : storyboardUsesSkill21() ? '每块≤15秒、最多5镜<br>审计结果与正文分开' : '按剧情动态分配<br>素材引用已分配'}</small></div>` : ''}${isAssets ? '<div class="side-stat vertical"><span>素材方式</span><b>GPT 订阅 / 本地上传</b><small>GPT Image 2 · 本机 Codex<br>图片齐全后可进入视频步骤</small></div>' : ''}${isVideo ? `<div class="side-stat vertical"><span>视频模型</span><b>${esc(seedanceModelLabel(project.videoGeneration?.model))}</b><small>${esc(project.videoGeneration?.ratio || seedanceStatus.ratio)} · ${esc(project.videoGeneration?.resolution || seedanceStatus.resolution)}<br>逐镜或批量 · 保存 MP4</small></div>` : ''}<button class="outline-button full" id="rerunStep" ${project.running ? 'disabled' : ''}>${isAssets ? '重新生成参考图' : isVideo ? '重新生成全部视频' : '重新生成分析与分镜'} <span>↻</span></button>${isVideo ? '<div class="auto-note">成功镜头已保存到本机，可逐个生成或批量继续。</div>' : stageComplete ? `<div class="auto-note"><i>${auditIgnored && project.activeStep === 'storyboard' ? '!' : '✓'}</i> ${isAssets ? '参考图已全部完成' : project.activeStep === 'storyboard' && storyboardUsesSkill21() ? auditIgnored ? '审计未通过，已忽略并继续' : storyboardUsesCustomSkill() ? '按用户 Skill 完成文本审计' : '分镜文本审计通过' : '当前阶段已完成'}</div>` : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
+  const body = `${pendingNotice}${partialNotice}${isAssets ? assetGenerationTemplate(output) : ''}${isVideo ? videoGenerationTemplate() : ''}${outlineOutput.body || ''}`;
+  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''} ${isVideo ? 'video-generation-layout' : ''}${auditIgnored && project.activeStep === 'storyboard' ? ' audit-ignored-result' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(resultTitle)}</h3><p>${esc(outlineOutput.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>${isVideo ? '镜头时长' : isOutline ? '大纲规模' : '预计耗时'}</span><b>${isVideo ? esc(videoDurationText) : isOutline ? esc(storyboardOutlineSummary(outlineOutput.outline)) : output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? `<div class="side-stat vertical"><span>分镜规范</span><b>${storyboardUsesCustomSkill() ? '用户 Skill' : storyboardUsesSkill21() ? 'Skill v2.1' : '即梦二点零'}</b><small>${storyboardUsesCustomSkill() ? esc(String(project.outputs.storyboard.auditSummary.skillName || '上传规范')) + '<br>按本次上传规范执行' : storyboardUsesSkill21() ? '每块≤15秒、最多5镜<br>审计结果与正文分开' : '按剧情动态分配<br>素材引用已分配'}</small></div>` : ''}${isAssets ? '<div class="side-stat vertical"><span>素材方式</span><b>GPT 订阅 / 本地上传</b><small>GPT Image 2 · 本机 Codex<br>图片齐全后可进入视频步骤</small></div>' : ''}${isVideo ? `<div class="side-stat vertical"><span>视频模型</span><b>${esc(seedanceModelLabel())}</b><small>${esc(currentVideoSettings().ratio)} · ${esc(currentVideoSettings().resolution)}<br>逐镜或批量 · 保存 MP4</small></div>` : ''}<button class="outline-button full" id="rerunStep" ${project.running ? 'disabled' : ''}>${isAssets ? '重新生成参考图' : isVideo ? '重新生成全部视频' : '重新生成大纲与分镜'} <span>↻</span></button>${isVideo ? '<div class="auto-note">成功镜头已保存到本机，可逐个生成或批量继续。</div>' : stageComplete ? `<div class="auto-note"><i>${auditIgnored && project.activeStep === 'storyboard' ? '!' : '✓'}</i> ${isAssets ? '参考图已全部完成' : project.activeStep === 'storyboard' && storyboardUsesSkill21() ? auditIgnored ? '审计未通过，已忽略并继续' : storyboardUsesCustomSkill() ? '按用户 Skill 完成文本审计' : '分镜文本审计通过' : '当前阶段已完成'}</div>` : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
 }
 
 function makeOutput(id) {
   const title = project.title === '未命名短剧项目' ? deriveTitle(project.script) : project.title;
   const story = getStoryUnits(project.script);
   const characters = story.characters.length ? story.characters : ['未识别人物'];
-  const type = getMetadataValue(project.script, ['类型', '题材']) || '短剧';
-  const sellingPoints = getMetadataValue(project.script, ['核心卖点', '卖点']) || story.units.slice(0, 2).map((unit) => unit.text).join('，');
-  const firstAction = story.units.find((unit) => unit.type === 'action')?.text || story.units[0]?.text || '剧情开始';
-  const firstDialogue = story.units.find((unit) => unit.type === 'dialogue');
-  if (id === 'analysis') return { title: '故事结构分析', subtitle: `已从剧本中识别 ${characters.length} 名人物`, time: '8 秒', body: `<div class="analysis-grid"><div><label>故事定位</label><strong>${esc(type)}</strong><p>${esc(sellingPoints.slice(0, 100))}</p></div><div><label>主要人物</label><strong>${esc(characters.join('、'))}</strong><p>后续分镜和素材均使用这些人物姓名。</p></div><div><label>开场事件</label><strong>${esc(firstAction.slice(0, 30))}</strong><p>${firstDialogue ? `${esc(firstDialogue.speaker)}的首句对白：“${esc(firstDialogue.text)}”` : '剧本暂未识别到独立对白。'}</p></div><div><label>解析状态</label><div class="tags"><span>已排除标题</span><span>已排除规格</span><span>已识别对白</span><span>已提取姓名</span></div></div></div><div class="callout"><b>人物校验</b><span>当前识别人物：${esc(characters.join('、'))}。若姓名不完整，请在原剧本中增加“人物：姓名一、姓名二”或使用“姓名：对白”的格式。</span></div>` };
+  if (id === 'analysis') return makeStoryboardOutlineOutput(currentStoryboardOutline());
   if (id === 'storyboard') return makeSeedanceStoryboard(project.script);
   if (id === 'assets') {
     const characterCards = characters.slice(0, 3).map((name, index) => `<div class="asset-card asset-character ${index % 2 ? 'dark' : ''}"><span class="asset-type">角色</span><strong>${esc(name)}</strong><small>外貌、发型、服装和表情参考图</small><em>对应 @${esc(name)}</em></div>`).join('');
     const sceneNo = Math.min(characters.length, 3) + 1;
     return { title: '视觉素材清单', subtitle: `角色 ${characters.length} 名 · 场景与道具参考`, time: '22 秒', body: `<div class="asset-grid">${characterCards}<div class="asset-card asset-scene"><span class="asset-type">场景</span><strong>主场景参考</strong><small>根据原剧本中的地点、构图和光线制作</small><em>对应 @主场景</em></div><div class="asset-card asset-scene blue"><span class="asset-type">道具</span><strong>关键道具参考</strong><small>根据剧情中的证据、手机、文件或物件制作</small><em>对应 @关键道具</em></div></div>` };
   }
-  return { title: 'Seedance 分镜视频', subtitle: '按第二步分镜逐条生成并保存 MP4', time: '数分钟 / 镜头', body: '' };
+  return { title: videoOutputTitle(), subtitle: '按第二步分镜逐条生成并保存 MP4', time: '数分钟 / 镜头', body: '' };
 }
 
 function getMetadataValue(script, labels) {
@@ -1275,8 +1359,10 @@ function deriveTitle(script) {
 }
 
 function render() {
+  const comfySettingsState = captureComfyVideoSettingsState(document);
   document.querySelector('#app').innerHTML = appTemplate();
   bindEvents();
+  restoreComfyVideoSettingsState(document, comfySettingsState);
   if (clearResultRequest?.ownerProject === project && clearResultRequest.stepId === project.activeStep) document.querySelector('#cancelClearResult')?.focus();
 }
 
@@ -1288,8 +1374,8 @@ function workflowProgressTemplate() {
   const customAudit = workflowRun?.ownerProject === project ? Boolean(workflowRun.stageSkills?.storyboard) : storyboardUsesCustomSkill();
   const auditIgnored = progress?.status === 'completed' && (progress.auditIgnored || project.outputs.storyboard?.auditSummary?.finalStatus === '审计未通过（已忽略）');
   const statusLabels = { running: '正在执行', completed: '已完成', failed: '执行失败', stopped: '已停止' };
-  const phaseLabels = { preparing: '准备提示词', candidate: '分析故事并生成分镜', audit: '独立审计 60 项规则', repair: '修正分镜并准备重新审计', validating: '校验分镜数据', completed: '分镜流程已完成', failed: '分镜流程未完成', stopped: '本次分镜生成已停止' };
-  const requestLabels = { candidate: '分析 / 分镜生成', repair: '自动修正', audit: '独立审计' };
+  const phaseLabels = { preparing: '准备提示词', candidate: '生成大纲和分镜脚本', audit: '独立审计 60 项规则', repair: '修正分镜并准备重新审计', validating: '校验分镜数据', completed: '分镜流程已完成', failed: '分镜流程未完成', stopped: '本次分镜生成已停止' };
+  const requestLabels = { candidate: '大纲 / 分镜生成', repair: '自动修正', audit: '独立审计' };
   const receiveLabels = { waiting: '等待首段响应', thinking: '接收模型思考', generating: '接收生成内容', completed: '响应已完成', failed: '请求失败', stopped: '已停止接收' };
   const previousPhaseLabels = { waiting: '等待首段', thinking: '模型思考', generating: '接收正文' };
   const previousPhase = ['failed', 'stopped'].includes(current?.status) && previousPhaseLabels[current.lastPhase]
@@ -1306,7 +1392,7 @@ function workflowProgressTemplate() {
     <div class="workflow-progress-current${auditIgnored ? ' warning' : ''}" role="status"><b>${auditIgnored ? '分镜流程已完成 · 审计失败已忽略' : customAudit && progress?.phase === 'audit' ? '独立审计用户 Skill' : phaseLabels[progress?.phase] || '等待开始生成分镜'}</b><span>${current ? `第 ${current.id} 次请求 · ${requestLabels[current.kind]} · ${receiveLabels[current.phase]}${previousPhase} · 单次 ${duration(current.elapsedMs)}` : progress?.status === 'running' ? '正在本地准备请求' : '开始后实时显示当前阶段与各部分耗时'}</span></div>
     <div class="workflow-progress-grid">
       <div class="workflow-progress-metric ${progress?.phase === 'preparing' ? 'active' : ''}"><div><b>01 提示词准备</b><strong>${preparing ? duration(progress.preparationMs) : '—'}</strong></div><small>${promptInfo}</small></div>
-      <div class="workflow-progress-metric ${['candidate', 'repair'].includes(progress?.phase) ? 'active' : ''}"><div><b>02 分析 / 分镜生成</b><strong>${progress?.generationCount ? duration(progress.generationMs) : '—'}</strong></div><small>生成与修正累计 ${progress?.generationCount || 0} 次请求</small></div>
+      <div class="workflow-progress-metric ${['candidate', 'repair'].includes(progress?.phase) ? 'active' : ''}"><div><b>02 大纲 / 分镜生成</b><strong>${progress?.generationCount ? duration(progress.generationMs) : '—'}</strong></div><small>生成与修正累计 ${progress?.generationCount || 0} 次请求</small></div>
       <div class="workflow-progress-metric ${current?.phase === 'thinking' && progress?.status === 'running' ? 'active' : ''}"><div><b>03 模型思考</b><strong>${duration(progress?.thinkingMs)}</strong></div><small>${esc(thinkingLabel)} · ${progress?.thinkingMs !== null && progress?.thinkingMs !== undefined ? '正文前思考接收窗口' : '尚未观测到思考片段'}</small></div>
       <div class="workflow-progress-metric ${progress?.phase === 'audit' ? 'active' : ''}"><div><b>04 独立审计 · ${customAudit ? '用户 Skill' : '60 项'}</b><strong>${progress?.auditCount ? duration(progress.auditMs) : '—'}</strong></div><small>审计 ${progress?.auditCount || 0} 次 · 自动回炉 ${progress?.repairCount || 0} / ${progress?.maxRepairs ?? 1} 次${auditIgnored ? ' · 失败已忽略' : ''}</small></div>
     </div>
@@ -1444,6 +1530,16 @@ function bindEvents() {
   document.querySelectorAll('[data-import-generation-skill]').forEach((button) => button.addEventListener('click', () => importGenerationSkill(button.dataset.importGenerationSkill)));
   document.querySelectorAll('[data-preview-generation-skill]').forEach((button) => button.addEventListener('click', () => previewGenerationSkill(button.dataset.previewGenerationSkill)));
   document.querySelectorAll('[data-remove-generation-skill]').forEach((button) => button.addEventListener('click', () => removeGenerationSkill(button.dataset.removeGenerationSkill)));
+  document.querySelectorAll('[data-reuse-generation-skill]').forEach((button) => button.addEventListener('click', () => openGenerationSkillHistory(button.dataset.reuseGenerationSkill)));
+  document.querySelector('#generationSkillHistorySelect')?.addEventListener('change', (event) => selectGenerationSkillHistory(event.target.value));
+  document.querySelector('#applyGenerationSkillHistory')?.addEventListener('click', applyGenerationSkillHistory);
+  document.querySelector('#closeGenerationSkillHistory')?.addEventListener('click', closeGenerationSkillHistory);
+  document.querySelector('#cancelGenerationSkillHistory')?.addEventListener('click', closeGenerationSkillHistory);
+  const skillHistoryModal = document.querySelector('#generationSkillHistoryModal');
+  if (skillHistoryModal) {
+    bindModalBackdropDismiss(skillHistoryModal, closeGenerationSkillHistory);
+    skillHistoryModal.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); closeGenerationSkillHistory(); } });
+  }
   document.querySelector('#closeGenerationSkillPreview')?.addEventListener('click', () => { generationSkillPreview = null; renderWithoutMovingPage(); });
   document.querySelector('#generationSkillPreviewModal')?.addEventListener('click', (event) => { if (event.target.id === 'generationSkillPreviewModal') { generationSkillPreview = null; renderWithoutMovingPage(); } });
   document.querySelector('#scriptInput').addEventListener('input', (event) => {
@@ -1520,7 +1616,7 @@ function bindEvents() {
   document.querySelector('#seedanceVideoProvider').addEventListener('change', (event) => { if (event.target.value === 'comfy') { closeSeedanceSettings(); openComfyVideoSettings(); } });
   document.querySelector('#comfyVideoProvider').addEventListener('change', (event) => { if (event.target.value === 'seedance') { closeComfyVideoSettings(); openSeedanceSettings(true); } });
   document.querySelector('#closeComfyVideoSettings').addEventListener('click', closeComfyVideoSettings);
-  document.querySelector('#comfyVideoSettingsModal').addEventListener('click', event => { if (event.target.id === 'comfyVideoSettingsModal') closeComfyVideoSettings(); });
+  bindModalBackdropDismiss(document.querySelector('#comfyVideoSettingsModal'), closeComfyVideoSettings);
   document.querySelector('#saveComfyVideo').addEventListener('click', saveComfyVideoSettings);
   document.querySelector('#testComfyVideo').addEventListener('click', testComfyVideoConnection);
   document.querySelectorAll('[data-seedance-generation-mode]').forEach((button) => button.addEventListener('click', () => selectSeedanceGenerationModeDraft(button.dataset.seedanceGenerationMode)));
@@ -1709,6 +1805,7 @@ function stopCurrentGeneration() {
   generationSkillImportSequence += 1;
   generationSkillImport = null;
   generationSkillPreview = null;
+  generationSkillHistorySelection = null;
   generationRun += 1;
   const stoppedPipeline = autoPipelineRun;
   if (stoppedPipeline) {
@@ -2083,11 +2180,7 @@ function storyboardAuditTemplate(summary) {
 function renderAIWorkflow(data, usage, model, generation = {}) {
   const provider = generation.provider || (String(model || 'deepseek-flash').startsWith('deepseek') ? 'deepseek' : 'codex-subscription');
   const modelLabel = provider === 'codex-subscription' ? `GPT 订阅 · ${model || generation.model || 'GPT'}` : 'DeepSeek V4.1 Flash';
-  if (!data || typeof data !== 'object' || !data.analysis || !data.storyboard || !data.assets) throw new Error(`${modelLabel} 返回的数据不完整，请重新生成。`);
-  const analysis = data.analysis || {};
-  const characters = Array.isArray(analysis.characters) ? analysis.characters : [];
-  const sellingPoints = Array.isArray(analysis.sellingPoints) ? analysis.sellingPoints : [];
-  const visualKeywords = Array.isArray(analysis.visualKeywords) ? analysis.visualKeywords : [];
+  if (!data || typeof data !== 'object' || !data.storyboard || !data.assets) throw new Error(`${modelLabel} 返回的数据不完整，请重新生成。`);
   const storyboard = data.storyboard || {};
   const shots = Array.isArray(storyboard.shots) ? storyboard.shots.map((shot) => ({ ...shot })) : [];
   const skill21 = storyboardUsesSkill21(storyboard);
@@ -2096,7 +2189,7 @@ function renderAIWorkflow(data, usage, model, generation = {}) {
   const partial = skill21 && auditSummary?.finalStatus === '部分通过（存在阻塞）';
   const auditIgnored = skill21 && auditSummary?.finalStatus === '审计未通过（已忽略）';
   const assets = data.assets || {};
-  if ((!skill21 && !characters.length) || (!shots.length && !partial)) throw new Error(`${modelLabel} 返回的数据不完整，请重新生成。`);
+  if (!shots.length && !partial) throw new Error(`${modelLabel} 返回的数据不完整，请重新生成。`);
   if (skill21 && (!auditSummary || !['全部通过', '部分通过（存在阻塞）', '审计未通过（已忽略）'].includes(auditSummary.finalStatus)
     || !Number.isInteger(auditSummary.repairCount) || auditSummary.repairCount < 0
     || !Array.isArray(auditSummary.rows) || !auditSummary.rows.length
@@ -2105,7 +2198,6 @@ function renderAIWorkflow(data, usage, model, generation = {}) {
     throw new Error(customSkill ? '分镜尚未通过用户 Skill 审计，已保留上次成果。' : '分镜尚未通过 Skill v2.1 审计，已保留上次成果。');
   }
 
-  const analysisBody = `<div class="analysis-grid"><div><label>故事定位</label><strong>${esc(String(analysis.positioning || ''))}</strong><p>${esc(String(analysis.coreConflict || ''))}</p></div><div><label>主要人物</label><strong>${esc(characters.map((item) => item.name).join('、'))}</strong><p>${esc(characters.map((item) => `${item.name}：${item.identity || item.traits || ''}`).join('；'))}</p></div><div><label>核心卖点</label><div class="tags">${sellingPoints.map((item) => `<span>${esc(String(item))}</span>`).join('')}</div></div><div><label>视觉关键词</label><div class="tags">${visualKeywords.map((item) => `<span>${esc(String(item))}</span>`).join('')}</div></div></div><div class="callout"><b>${esc(modelLabel)}</b><span>${esc(String(analysis.coreConflict || '已完成故事结构分析。'))}</span></div>`;
   const unifiedSuffix = skill21 ? '' : String(storyboard.unifiedSuffix || '');
   const shotCards = shots.map((shot, index) => {
     const uploads = Array.isArray(shot.uploads) ? shot.uploads : [];
@@ -2136,11 +2228,10 @@ function renderAIWorkflow(data, usage, model, generation = {}) {
       .filter((key) => Object.hasOwn(storyboard, key))
       .map((key) => [key, structuredClone(storyboard[key])]),
   ) : {};
-  const analysisTitle = typeof analysis.title === 'string' && analysis.title.trim() ? analysis.title : '故事结构分析';
   const storyboardTitle = typeof storyboard.title === 'string' && storyboard.title.trim() ? storyboard.title : (customSkill ? '用户 Skill 分镜提示词' : skill21 ? 'Skill v2.1 分镜提示词' : '即梦二点零分镜提示词');
 
   return {
-    analysis: { title: analysisTitle, subtitle: `模型：${model || generation.model || 'deepseek-flash'}${provider === 'codex-subscription' ? ` · 思考 ${generation.reasoningEffort || '默认'}` : ''} · ${usageText}`, time: 'AI 生成', body: analysisBody },
+    analysis: makeStoryboardOutlineOutput(buildStoryboardOutline({ shots }, assets), { generationInfo: `模型：${model || generation.model || 'deepseek-flash'}${provider === 'codex-subscription' ? ` · 思考 ${generation.reasoningEffort || '默认'}` : ''} · ${usageText}` }),
     storyboard: { title: storyboardTitle, subtitle: `${shots.length} 个${skill21 ? `生成块 · ${actualShotCount} 个实际镜头` : '镜头'} · ${partial ? '部分通过，受阻范围见审计结果' : auditIgnored ? '审计未通过，已忽略并继续' : '时长由剧情动态分配'}`, time: 'AI 生成', prompts: shots.map((shot) => String(shot.prompt || '')), durations: shots.map((shot) => (skill21 ? resolveStoryboardDuration : resolveSeedanceDuration)(shot.duration, shot.prompt, SEEDANCE_DEFAULT_DURATION)), shots, unifiedSuffix, ...(skill21 ? { skillVersion: '2.1', auditSummary, ...storyboardRecords } : {}), body: storyboardBody },
     assets: { title: '视觉参考图素材', subtitle: `${promptItems.length} 项 · GPT 订阅生图或本地上传`, time: '按项生成', promptItems, body: assetsBody },
   };
@@ -3317,7 +3408,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
   if (shortBlockIndexes.length) {
     project.running = false;
     focusGenerationStep('video', videoFocus);
-    state.lastError = `生成块 ${shortBlockIndexes.map((index) => String(project.outputs.storyboard.shots?.[index]?.no || index + 1).padStart(2, '0')).join('、')} 的自然时长不足4秒。Seedance 当前仅接受4—15秒，请按 Skill 合理重分块并重新审计后再生成；程序不会自动补空镜、加速或拉长。`;
+    state.lastError = `生成块 ${shortBlockIndexes.map((index) => String(project.outputs.storyboard.shots?.[index]?.no || index + 1).padStart(2, '0')).join('、')} 的自然时长不足4秒。${videoServiceLabel(provider)} 当前仅接受4—15秒，请按 Skill 合理重分块并重新审计后再生成；程序不会自动补空镜、加速或拉长。`;
     saveProject(); renderWithoutMovingPage();
     return showToast(state.lastError);
   }
@@ -3484,6 +3575,7 @@ function readFile(event) {
 function copyOutput() {
   const output = project.outputs[project.activeStep];
   if (!output) return showToast('当前还没有生成结果');
+  if (project.activeStep === 'analysis') return copyText(serializeStoryboardOutline(currentStoryboardOutline()), '分镜大纲已复制');
   if (project.activeStep === 'storyboard' && storyboardUsesSkill21()) {
     const prompts = output.prompts || [];
     if (!prompts.length) return showToast('当前没有可复制的分镜正文');
@@ -3508,7 +3600,9 @@ function fallbackCopy(value, message) {
 }
 
 function exportProject() {
-  const payload = JSON.stringify({ ...project, exportedAt: new Date().toISOString() }, null, 2);
+  const outputs = { ...project.outputs };
+  if (outputs.analysis) outputs.analysis = makeStoryboardOutlineOutput(currentStoryboardOutline(), outputs.analysis);
+  const payload = JSON.stringify({ ...project, outputs, exportedAt: new Date().toISOString() }, null, 2);
   const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
   const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${project.title || 'storyforge-project'}.json`; link.click(); URL.revokeObjectURL(link.href); showToast('项目包已导出');
 }

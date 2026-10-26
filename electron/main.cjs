@@ -94,7 +94,7 @@ function assertCodexImageSender(event) {
   const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
   const actual = String(event.senderFrame?.url || '').split(/[?#]/)[0];
   if (actual !== expected || event.senderFrame !== event.sender.mainFrame) {
-    throw new Error('只能从 StoryForge 主窗口使用订阅生图。');
+    throw new Error('只能从 XStudio 主窗口使用订阅生图。');
   }
 }
 
@@ -224,7 +224,7 @@ function assertStoryForgePath(rawPath, kind = '文件') {
   const target = path.resolve(String(rawPath || '').trim());
   const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
   if (!target || (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`))) {
-    throw new Error(`只能访问 StoryForge 生成的${kind}。`);
+    throw new Error(`只能访问 XStudio 生成的${kind}。`);
   }
   return target;
 }
@@ -242,7 +242,7 @@ function uniqueLocalAssetPath(directory, baseName, extension) {
 
 ipcMain.handle('skills:import-document', async (event, rawTask = {}) => {
   const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
-  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口上传 Skill。');
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 XStudio 主窗口上传 Skill。');
   if (!['storyboard', 'assets'].includes(rawTask?.stage)) throw new Error('请选择分镜或素材阶段上传 Skill。');
   const selection = await dialog.showOpenDialog({
     title: rawTask.stage === 'storyboard' ? '选择分镜生成 Skill 文档' : '选择视觉素材 Skill 文档',
@@ -271,7 +271,7 @@ ipcMain.handle('deepseek:generate-workflow', async (event, rawScript, rawRun = {
   const sender = event.sender;
   const frame = event.senderFrame;
   const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
-  if (frame !== sender.mainFrame || String(frame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口生成分镜。');
+  if (frame !== sender.mainFrame || String(frame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 XStudio 主窗口生成分镜。');
   const run = rawRun && typeof rawRun === 'object' && !Array.isArray(rawRun) ? rawRun : {};
   for (const key of ['runId', 'projectId']) if (run[key] !== undefined && (typeof run[key] !== 'string' || run[key].length > 128)) throw new Error('生成任务标识无效，请重新开始。');
   if (run.autoRunToVideo !== undefined && typeof run.autoRunToVideo !== 'boolean') throw new Error('全流程自动生成开关无效，请重新设置。');
@@ -334,7 +334,7 @@ ipcMain.handle('deepseek:generate-workflow', async (event, rawScript, rawRun = {
 
 ipcMain.handle('deepseek:cancel-workflow', (event, run = {}) => {
   const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
-  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口停止分镜。');
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 XStudio 主窗口停止分镜。');
   if (!run || typeof run.runId !== 'string' || !run.runId || run.runId.length > 128 || typeof run.projectId !== 'string' || run.projectId.length > 128) throw new Error('生成任务标识无效。');
   const job = workflowOwners.get(`${event.sender.id}:${run.runId}`);
   if (!job || job.projectId !== run.projectId) return { canceled: false };
@@ -344,13 +344,13 @@ ipcMain.handle('deepseek:cancel-workflow', (event, run = {}) => {
 
 ipcMain.handle('codex-text:get-status', async (event) => {
   const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
-  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口检查 GPT 分镜连接。');
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 XStudio 主窗口检查 GPT 分镜连接。');
   return getCodexTextStatus(readCodexImageSettings());
 });
 
 ipcMain.handle('codex-text:choose-cli', async (event) => {
   const expected = pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
-  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 StoryForge 主窗口配置 GPT 分镜。');
+  if (event.senderFrame !== event.sender.mainFrame || String(event.senderFrame?.url || '').split(/[?#]/)[0] !== expected) throw new Error('只能从 XStudio 主窗口配置 GPT 分镜。');
   const selection = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: '选择本机 Codex 程序（codex.exe）', properties: ['openFile'],
     filters: [{ name: 'Codex 程序', extensions: ['exe'] }],
@@ -662,7 +662,7 @@ ipcMain.handle('seedream:open-output', async (_event, rawPath) => {
   const target = path.resolve(String(rawPath || '').trim());
   if (!target) throw new Error('还没有可打开的图片目录。');
   const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
-  if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能打开 StoryForge 图片目录。');
+  if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能打开 XStudio 图片目录。');
   const result = await shell.openPath(target);
   if (result) throw new Error(result);
   return { ok: true };
@@ -670,7 +670,7 @@ ipcMain.handle('seedream:open-output', async (_event, rawPath) => {
 ipcMain.handle('seedream:show-item', (_event, rawPath) => {
   const target = path.resolve(String(rawPath || '').trim());
   const allowedRoot = path.resolve(app.getPath('documents'), 'StoryForge');
-  if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能查看 StoryForge 生成的图片。');
+  if (target !== allowedRoot && !target.startsWith(`${allowedRoot}${path.sep}`)) throw new Error('只能查看 XStudio 生成的图片。');
   if (!target || !fs.existsSync(target)) throw new Error('本地图片不存在，可能已被移动或删除。');
   shell.showItemInFolder(target);
   return { ok: true };
@@ -694,7 +694,7 @@ const createWindow = () => {
     height: 920,
     minWidth: 1080,
     minHeight: 700,
-    title: 'AI Studio',
+    title: 'XStudio',
     icon: path.join(__dirname, '..', 'dist', 'studio.ico'),
     backgroundColor: '#f5f6f8',
     autoHideMenuBar: true,

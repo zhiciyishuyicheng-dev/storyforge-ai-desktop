@@ -1,6 +1,65 @@
 const esc = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const options = (values, selected) => values.map(([id, label]) => `<option value="${id}" ${id === selected ? 'selected' : ''}>${label}</option>`).join('');
 
+export function bindModalBackdropDismiss(modal, close) {
+  let startedOnBackdrop = false;
+  let endedOnBackdrop = false;
+  modal.addEventListener('pointerdown', event => {
+    startedOnBackdrop = event.target === modal && event.button === 0;
+    endedOnBackdrop = false;
+  });
+  modal.addEventListener('pointerup', event => {
+    endedOnBackdrop = event.target === modal && event.button === 0;
+  });
+  modal.addEventListener('pointercancel', () => { startedOnBackdrop = endedOnBackdrop = false; });
+  modal.addEventListener('click', event => {
+    const dismiss = startedOnBackdrop && endedOnBackdrop && event.target === modal;
+    startedOnBackdrop = endedOnBackdrop = false;
+    if (dismiss) close();
+  });
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); close(); }
+  });
+}
+
+// Status refreshes redraw the app. Keep an open connection form and its text
+// selection in memory rather than replacing the user's unfinished edits.
+export function captureComfyVideoSettingsState(document) {
+  const modal = document.querySelector('#comfyVideoSettingsModal');
+  if (!modal || modal.hidden !== false) return null;
+  const focused = document.activeElement;
+  const message = modal.querySelector('#comfyVideoMessage');
+  return {
+    fields: [...modal.querySelectorAll('input, select')].map(field => ({ id: field.id, value: field.value, checked: field.checked })),
+    details: [...modal.querySelectorAll('details')].map(details => details.open),
+    message: message ? { text: message.textContent, className: message.className } : null,
+    focus: modal.contains(focused) ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection } : null,
+  };
+}
+
+export function restoreComfyVideoSettingsState(document, state) {
+  if (!state) return;
+  const modal = document.querySelector('#comfyVideoSettingsModal');
+  if (!modal) return;
+  modal.hidden = false;
+  for (const saved of state.fields) {
+    const field = document.getElementById(saved.id);
+    if (!field || !modal.contains(field)) continue;
+    field.value = saved.value;
+    if (typeof saved.checked === 'boolean') field.checked = saved.checked;
+  }
+  [...modal.querySelectorAll('details')].forEach((details, index) => { details.open = state.details[index] === true; });
+  const message = modal.querySelector('#comfyVideoMessage');
+  if (message && state.message) { message.textContent = state.message.text; message.className = state.message.className; }
+  const focused = state.focus?.id && document.getElementById(state.focus.id);
+  if (focused && modal.contains(focused)) {
+    focused.focus({ preventScroll: true });
+    if (typeof state.focus.start === 'number' && typeof focused.setSelectionRange === 'function') {
+      focused.setSelectionRange(state.focus.start, state.focus.end, state.focus.direction);
+    }
+  }
+}
+
 export function comfyVideoSettingsTemplate(status) {
   const modelField = (key, label) => `<label class="key-field"><span>${label}</span><input id="comfy-${key}" value="${esc(status[key])}" placeholder="留空自动检测已安装模型"></label>`;
   return `<div class="modal-backdrop" id="comfyVideoSettingsModal" hidden><div class="settings-modal seedance-settings-modal">

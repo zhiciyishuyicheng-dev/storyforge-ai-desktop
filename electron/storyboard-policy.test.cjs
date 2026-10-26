@@ -21,7 +21,7 @@ function updatePrompt(candidate) {
 
 function candidate({ voice = false, duration = 8, twoShots = false } = {}) {
   const value = {
-    analysis: { title: '窗边的决定', positioning: '古装短剧', coreConflict: '阿青决定是否送信', characters: [{ name: '阿青', identity: '送信人', traits: '克制', goal: '送信' }], sellingPoints: ['决定'], visualKeywords: ['东窗'] },
+    outline: { title: '分镜大纲' },
     assets: {
       characters: [{ name: '阿青', fileName: '人物-阿青-参考图.png', prompt: '阿青的独立单人参考图，成年女子，古装衣着，清楚展示脸部与全身服装轮廓，不含文字。' }],
       scenes: [{ name: '书房', fileName: '场景-书房-参考图.png', prompt: '白天古装书房的一张单机位空镜图，东侧窗户下有木桌，西侧有房门，空间结构清楚，不含文字。' }],
@@ -30,7 +30,8 @@ function candidate({ voice = false, duration = 8, twoShots = false } = {}) {
     storyboard: {
       skillVersion: '2.1', unifiedSuffix: '',
       shots: [{
-        no: '01', title: '窗边的决定', duration, sceneId: '书房_白天',
+        no: '01', title: '窗边的决定', duration, sceneId: '书房_白天', scene: '书房·白天',
+        outline: '窗边的决定。阿青坐在东窗下托着白瓷杯，看向西侧房门；镜头观察她作出决定后的平静神情。',
         startState: '阿青坐在东窗下，面向西侧房门，右手托着白瓷杯。',
         endState: '阿青仍坐在东窗下，白瓷杯仍在右手，目光落在西侧房门。',
         uploads: [{ ref: '@Image1', asset: '阿青', purpose: '阿青唯一外观参考' }, { ref: '@Image2', asset: '书房', purpose: '白天书房唯一场景参考' }],
@@ -87,7 +88,7 @@ function blocker(no = '02') {
 
 test('一个完整生成块即可通过，不要求至少三块或固定十五秒', () => {
   const value = candidate();
-  assert.deepEqual(Object.keys(value).sort(), ['analysis', 'assets', 'storyboard']);
+  assert.deepEqual(Object.keys(value).sort(), ['assets', 'outline', 'storyboard']);
   assert.deepEqual(validateCandidate(value, { script: ORIGINAL }).errors, []);
   const result = validateAudit(value, auditFor(value), { script: ORIGINAL });
   assert.equal(result.valid, true);
@@ -217,8 +218,8 @@ test('忽略交付仍拒绝缺正文、null段、无效时长、坏素材及基�
     value => { value.storyboard.shots[0].duration = Infinity; },
     value => { value.storyboard.shots[0].no = null; },
     value => { value.storyboard.shots[0].no = { unexpected: '01' }; },
-    value => { value.analysis.characters = [null]; },
-    value => { value.analysis.visualKeywords = null; },
+    value => { value.outline = null; },
+    value => { delete value.outline; },
     value => { value.assets.characters = [null]; },
     value => { value.assets.scenes[0].prompt = ''; },
     value => { value.assets.characterChecklist = [null]; },
@@ -574,8 +575,14 @@ test('坏结构作为可修正错误返回，不让本地校验进程崩溃', ()
 });
 
 test('基础工作流外壳、素材名称与文件名严格唯一', () => {
-  const noAnalysis = candidate(); delete noAnalysis.analysis;
-  expectCode(validateCandidate(noAnalysis, { script: ORIGINAL }), 'ANALYSIS_SHAPE');
+  const noOutline = candidate(); delete noOutline.outline;
+  expectCode(validateCandidate(noOutline, { script: ORIGINAL }), 'OUTLINE_SHAPE');
+  const noOutlineTitle = candidate(); noOutlineTitle.outline.title = '';
+  expectCode(validateCandidate(noOutlineTitle, { script: ORIGINAL }), 'OUTLINE_TITLE');
+  for (const key of ['scene', 'outline']) {
+    const missing = candidate(); delete missing.storyboard.shots[0][key];
+    expectCode(validateCandidate(missing, { script: ORIGINAL }), 'OUTLINE_BLOCK_FIELDS');
+  }
   const noSceneId = candidate(); noSceneId.storyboard.shots[0].sceneId = '';
   expectCode(validateCandidate(noSceneId, { script: ORIGINAL }), 'SCENE_ID');
   const duplicateName = candidate(); duplicateName.assets.props.push({ ...duplicateName.assets.characters[0], fileName: '道具-杯-参考图.png' });
@@ -590,7 +597,6 @@ test('基础工作流外壳、素材名称与文件名严格唯一', () => {
 
 test('无人出镜或纯画外音允许人物记录与人物图数组为空', () => {
   const value = candidate();
-  value.analysis.characters = [];
   value.assets.characters = [];
   value.assets.characterChecklist = [];
   value.assets.characterDifferenceMatrix = [];
@@ -602,6 +608,24 @@ test('无人出镜或纯画外音允许人物记录与人物图数组为空', ()
   assert.equal(validateCandidate(value, { script: '书房里空无一人。' }).valid, true);
   value.assets.characterChecklist = [{ name: '旁白', requiresReferenceImage: false }];
   assert.equal(validateCandidate(value, { script: '书房里空无一人。' }).valid, true);
+});
+
+test('旧故事分析对象不再是创作或素材门禁，旧项目从最终分镜兼容生成大纲', async () => {
+  const legacy = candidate();
+  delete legacy.outline;
+  delete legacy.storyboard.shots[0].outline;
+  delete legacy.storyboard.shots[0].scene;
+  legacy.analysis = { title: '旧故事分析', characters: null, visualKeywords: null };
+  const original = clone(legacy);
+  assert.equal(validateCandidate(legacy, { script: ORIGINAL }).valid, true);
+  assert.equal(canPublishIgnoredCandidate(legacy), true);
+  const api = workflowTransport([legacy, auditFor(legacy)]);
+  const result = await createWorkflowRunner({ request: api.request })(ORIGINAL);
+  assert.deepEqual(api.calls.map(call => call.options.phase), ['candidate', 'audit']);
+  assert.equal(result.data.outline.title, '分镜大纲');
+  assert.equal(result.data.storyboard.shots[0].scene, '书房');
+  assert.match(result.data.storyboard.shots[0].outline, /阿青坐在东窗下/u);
+  assert.deepEqual(legacy, original);
 });
 
 test('直接从原文生成分镜不要求分集大纲或改编剧本，旧冗余字段兼容忽略', () => {
@@ -715,6 +739,8 @@ test('真实policy集成：模型自报通过不能覆盖时间或原声错误�
   for (const failure of ['duration', 'voice']) {
     const repaired = candidate({ voice: true, twoShots: true });
     const invalid = clone(repaired);
+    invalid.storyboard.shots[0].scene = '旧场景摘要';
+    invalid.storyboard.shots[0].outline = '旧内容摘要';
     if (failure === 'duration') {
       invalid.storyboard.shots[0].duration = 16;
       invalid.storyboard.shots[0].segments[1].time = '4-16秒';
@@ -732,6 +758,11 @@ test('真实policy集成：模型自报通过不能覆盖时间或原声错误�
     assert.equal(result.data.storyboard.verification.repairCount, 1);
     assert.equal(result.data.storyboard.auditSummary.repairCount, 1);
     assert.equal(result.data.storyboard.shots[0].duration, 8);
+    assert.equal(Object.hasOwn(result.data, 'analysis'), false);
+    assert.equal(result.data.outline.title, '分镜大纲');
+    assert.equal(result.data.storyboard.shots[0].scene, repaired.storyboard.shots[0].scene);
+    assert.equal(result.data.storyboard.shots[0].outline, repaired.storyboard.shots[0].outline);
+    assert.match(api.calls[2].messages[1].content, /同步更新最终每块scene与outline/u);
     assert.equal(result.data.storyboard.voiceSources[0].text, LINE);
     assert.match(api.calls[2].messages[1].content, failure === 'duration' ? /BLOCK_DURATION/u : /VOICE_NOT_IN_ORIGINAL/u);
     assert.equal(validateAudit(result.data, result.data.storyboard.auditRecord, { script: ORIGINAL }).valid, true);
@@ -876,6 +907,18 @@ test('用户Skill仍保持JSON可展示结构、精确素材身份与真实阻�
   const blocked = customCandidate(); blocked.storyboard.blockers = [blocker('01')];
   assert.equal(hasGenuineBlockers(blocked), true);
   assert.throws(() => buildIgnoredAuditSummary(blocked, customAudit(blocked), { context }), /真实剧情阻塞/);
+});
+
+test('用户Skill新契约无需故事分析，但大纲必须逐块带有场景和剧情镜头摘要', () => {
+  const value = customCandidate();
+  const context = { stageSkills: USER_SKILLS };
+  assert.equal(Object.hasOwn(value, 'analysis'), false);
+  assert.equal(validateCandidate(value, { script: ORIGINAL, context }).valid, true);
+  assert.equal(canPublishIgnoredCandidate(value, { context }), true);
+  for (const key of ['scene', 'outline']) {
+    const missing = clone(value); missing.storyboard.shots[0][key] = '';
+    expectCode(validateCandidate(missing, { script: ORIGINAL, context }), 'OUTLINE_BLOCK_FIELDS');
+  }
 });
 
 test('用户Skill使用具名引用无需旧Image编号，并拒绝别名或多ref重复同一资产', () => {

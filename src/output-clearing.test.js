@@ -1,3 +1,5 @@
+import * as skillHistory from './generation-skill-history.js';
+import * as outlineUI from './storyboard-outline.js';
 import * as comfyUI from './comfy-video-ui.js';
 import * as h3 from './h3-references.js';
 import test from 'node:test';
@@ -16,6 +18,8 @@ function harness(api = {}) {
   const storage = new Map();
   const apiCalls = [];
   const context = vm.createContext({
+    ...skillHistory,
+    ...outlineUI,
     ...durations, ...references, ...generation, ...workflowProgress, ...comfyUI, ...h3,
     structuredClone,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
@@ -199,7 +203,7 @@ test('清空分镜后刷新项目，第四步仍可播放既有本地视频', ()
   assert.match(html, /file:\/\/\/C:\/saved\/videos\/镜头-01\.mp4/);
   assert.equal(h.run('project.videoGeneration.items[0].status'), 'success');
   assert.equal(h.run('project.outputs.storyboard'), undefined);
-  assert.equal(h.run('project.outputs.analysis.title'), '原故事分析');
+  assert.equal(h.run('project.outputs.analysis.title'), '分镜大纲');
   assert.equal(h.run('project.assetGeneration.items[0].files[0].localPath'), 'C:/saved/images/阿宁.png');
 });
 

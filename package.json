@@ -1,8 +1,8 @@
 {
   "name": "story-to-screen-studio",
-  "productName": "AI Studio",
+  "productName": "XStudio",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.1.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -21,9 +21,9 @@
   },
   "build": {
     "appId": "com.storyforge.desktop",
-    "productName": "AI Studio",
+    "productName": "XStudio",
     "directories": {
-      "output": "release-v1.0.6"
+      "output": "release-v1.1.0"
     },
     "files": [
       "dist/**/*",
@@ -35,28 +35,28 @@
       "target": [
         "nsis"
       ],
-      "executableName": "AI Studio",
+      "executableName": "XStudio",
       "icon": "public/studio.ico",
       "signExecutable": false,
-      "artifactName": "AI-Studio-Setup-${version}-${arch}.${ext}"
+      "artifactName": "XStudio-Setup-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "AI Studio",
+      "shortcutName": "XStudio",
       "installerIcon": "public/studio.ico",
       "uninstallerIcon": "public/studio.ico",
       "installerHeaderIcon": "public/studio.ico",
-      "uninstallDisplayName": "AI Studio"
+      "uninstallDisplayName": "XStudio"
     }
   },
   "dependencies": {
     "mammoth": "1.13.0",
     "pdfjs-dist": "6.4.299"
   },
-  "description": "AI Studio：从故事、分镜和参考图到批量视频的 Windows 桌面应用",
+  "description": "XStudio：从故事、分镜和参考图到批量视频的 Windows 桌面应用",
   "repository": {
     "type": "git",
     "url": "https://github.com/zhiciyishuyicheng-dev/storyforge-ai-desktop.git"

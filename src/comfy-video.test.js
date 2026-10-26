@@ -1,3 +1,5 @@
+import * as skillHistory from './generation-skill-history.js';
+import * as outlineUI from './storyboard-outline.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,6 +17,8 @@ const renderer = source.slice(0, source.lastIndexOf('\nrender();')).replace(/^im
 function harness(api = {}) {
   const storage = new Map(); const calls = { create: [], poll: [], download: [] };
   const context = vm.createContext({
+    ...skillHistory,
+    ...outlineUI,
     ...durations, ...references, ...generation, ...workflowProgress, ...h3, ...comfyUI, structuredClone,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { storyforgeAI: {
@@ -71,4 +75,59 @@ test('reference mapping matches identities after reordering and preserves exact 
   assert.deepEqual(request.imagePaths, ['b.png', 'a.png']);
   assert.match(request.prompt, /<Picture 1> 看着 <Picture 2>，说：“别动，我来。” <Picture 1> 点头。/);
   assert.throws(() => h3.buildH3ReferenceRequest({ prompt: '@Audio1', shot: {} }), /移除/);
+});
+
+test('H3 result and sidebar follow the selected service despite a cached Seedance title and model', () => {
+  const h = harness();
+  h.run(`
+    project.outputs.video.title = 'Seedance 分镜视频';
+    project.videoGeneration.model = SEEDANCE_DEFAULT_MODEL;
+    project.videoGeneration.ratio = '9:16';
+    project.videoGeneration.resolution = '720p';
+    comfyVideoStatus = { ...comfyVideoStatus, model: 'minimax_h3_ref2va.safetensors', ratio: '16:9', resolution: '768p' };
+  `);
+  const output = h.run('outputContentTemplate()');
+  assert.match(output, /<h3>MiniMax H3 分镜视频<\/h3>/);
+  assert.match(output, /视频模型<\/span><b>MiniMax H3 · Ref2VA<\/b><small>16:9 · 768p/);
+  assert.doesNotMatch(output.replace(/<[^>]*>/g, ' '), /Seedance/);
+  assert.match(h.run('appTemplate()'), /第四步由 MiniMax H3 生成视频/);
+  assert.equal(h.run('project.outputs.video.title'), 'Seedance 分镜视频');
+});
+
+test('switching to Seedance updates the same cached H3 output and current settings display', () => {
+  const h = harness();
+  h.run(`
+    project.outputs.video.title = 'MiniMax H3 分镜视频';
+    project.videoGeneration.provider = 'seedance';
+    project.videoGeneration.model = 'minimax_h3_ref2va.safetensors';
+    seedanceStatus = { ...seedanceStatus, configured: true, model: 'doubao-seedance-2-0-fast-260128', ratio: '9:16', resolution: '720p' };
+  `);
+  const output = h.run('outputContentTemplate()');
+  assert.match(output, /<h3>Seedance 分镜视频<\/h3>/);
+  assert.match(output, /视频模型<\/span><b>Seedance 2.0 Fast<\/b><small>9:16 · 720p/);
+  assert.doesNotMatch(output, /MiniMax H3/);
+  assert.match(h.run('appTemplate()'), /第四步由 Seedance 生成视频/);
+});
+
+test('H3 fallback and ready states use H3 labels before the first video output exists', () => {
+  const h = harness();
+  h.run('delete project.outputs.video');
+  assert.match(h.run('outputContentTemplate()'), /<h3>MiniMax H3 分镜视频<\/h3>/);
+  h.run(`project.outputs = {}; project.videoGeneration.items = []; project.completed = ['analysis', 'storyboard', 'assets'];`);
+  const ready = h.run('outputContentTemplate()');
+  assert.match(ready, /READY FOR MINIMAX H3/);
+  assert.match(ready, /MiniMax H3 支持单独生成一个镜头/);
+  assert.doesNotMatch(ready.replace(/<[^>]*>/g, ' '), /SEEDANCE|Seedance/);
+  assert.equal(h.run("makeOutput('video').title"), 'MiniMax H3 分镜视频');
+});
+
+test('switching the current service display leaves completed video version provenance unchanged', async () => {
+  const h = harness();
+  await h.run('generateSeedanceVideos({token:generationRun})');
+  const before = h.snapshot('project.videoGeneration.items[0].versions');
+  h.run("project.videoGeneration.provider = 'seedance'; project.outputs.video.title = 'MiniMax H3 分镜视频'");
+  assert.match(h.run('outputContentTemplate()'), /<h3>Seedance 分镜视频<\/h3>/);
+  assert.deepEqual(h.snapshot('project.videoGeneration.items[0].versions'), before);
+  assert.equal(before[0].provider, 'comfy');
+  assert.equal(before[0].model, 'h3-ref2va');
 });

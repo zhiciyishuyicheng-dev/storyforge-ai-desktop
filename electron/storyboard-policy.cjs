@@ -111,10 +111,22 @@ function videoDurationErrors(candidate, context) {
 
 // Audit warnings may be bypassed after repair; unreadable data cannot. Keep this
 // delivery-shape check separate from story, timing, voice and reference rules.
+function outlineErrors(candidate) {
+  // Old saved responses used analysis; those display from their final shots.
+  // New responses must supply a compact outline on each corresponding block.
+  if (!Object.hasOwn(candidate ?? {}, 'outline') && isObject(candidate?.analysis)) return [];
+  if (!isObject(candidate?.outline)) return [error('OUTLINE_SHAPE', '缺少分镜大纲对象。', null, 'G7')];
+  const errors = [];
+  if (!clean(candidate.outline.title)) errors.push(error('OUTLINE_TITLE', '分镜大纲缺少标题。', null, 'G7'));
+  for (const shot of Array.isArray(candidate?.storyboard?.shots) ? candidate.storyboard.shots : []) {
+    if (!clean(shot?.outline) || !clean(shot?.scene)) errors.push(error('OUTLINE_BLOCK_FIELDS', '每个生成块须包含场景 scene 及剧情内容与镜头重点 outline，与本块实际内容一致。', blockNo(shot?.no), 'G7'));
+  }
+  return errors;
+}
+
 function canPublishIgnoredCandidate(candidate, { context } = {}) {
-  if (!isObject(candidate) || !isObject(candidate.analysis) || !isObject(candidate.assets) || !isObject(candidate.storyboard)) return false;
-  const { analysis, assets, storyboard: board } = candidate;
-  if (!['characters', 'sellingPoints', 'visualKeywords'].every(key => Array.isArray(analysis[key])) || analysis.characters.some(item => !isObject(item))) return false;
+  if (!isObject(candidate) || (!isObject(candidate.outline) && !isObject(candidate.analysis)) || !isObject(candidate.assets) || !isObject(candidate.storyboard)) return false;
+  const { assets, storyboard: board } = candidate;
   if (![...ASSET_KINDS, 'characterChecklist', 'characterDifferenceMatrix'].every(key => Array.isArray(assets[key]) && assets[key].every(isObject))) return false;
   if (ASSET_KINDS.some(key => assets[key].some(item => !clean(item.name) || !clean(item.fileName) || !clean(item.prompt)))) return false;
   if (!Array.isArray(board.shots) || !board.shots.length || hasGenuineBlockers(candidate)) return false;
@@ -130,8 +142,8 @@ function validateCandidate(candidate, { script, context } = {}) {
     const shots = candidate?.storyboard?.shots;
     const errors = !Array.isArray(shots) || !shots.length
       ? [error('NO_BLOCKS', '没有可交付生成块；缺材料时须明确报告阻塞。')]
-      : !canPublishIgnoredCandidate({ ...candidate, storyboard: { ...candidate.storyboard, blockers: [] } }) ? [error('CUSTOM_CANDIDATE_SHAPE', '用户 Skill 结果缺少可展示的完整分镜、故事分析或素材结构。')]
-        : customIdentityErrors(candidate);
+      : !canPublishIgnoredCandidate({ ...candidate, storyboard: { ...candidate.storyboard, blockers: [] } }) ? [error('CUSTOM_CANDIDATE_SHAPE', '用户 Skill 结果缺少可展示的完整分镜大纲、分镜或素材结构。')]
+        : [...outlineErrors(candidate), ...customIdentityErrors(candidate)];
     errors.push(...videoDurationErrors(candidate, context));
     return { valid: errors.length === 0, errors, blockNos: Array.isArray(shots) ? shots.map(shot => blockNo(shot?.no)) : [], scope: '用户 Skill · 文本与计划' };
   }
@@ -144,12 +156,7 @@ function validateCandidate(candidate, { script, context } = {}) {
   if (typeof board.unifiedSuffix !== 'string' || board.unifiedSuffix !== '') add('UNIFIED_SUFFIX', '每块应自带一次风格段，统一附加词必须为空。', null, 'G7');
   const shots = Array.isArray(board.shots) ? board.shots : [];
   if (!shots.length) add('NO_BLOCKS', '没有可交付生成块；缺材料时须明确报告阻塞。', null, 'A1');
-  if (!isObject(candidate?.analysis) || !Array.isArray(candidate.analysis.characters) || !Array.isArray(candidate.analysis.sellingPoints) || !Array.isArray(candidate.analysis.visualKeywords)) add('ANALYSIS_SHAPE', '故事分析须包含人物、卖点与视觉关键词数组；无人出镜时人物数组可为空。', null, 'G7');
-  else {
-    if (['title', 'positioning', 'coreConflict'].some(key => !clean(candidate.analysis[key]))) add('ANALYSIS_FIELDS', '故事分析缺少标题、题材定位或核心冲突。', null, 'G7');
-    if (candidate.analysis.characters.some(item => !isObject(item) || ['name', 'identity', 'traits', 'goal'].some(key => !clean(item[key])))) add('ANALYSIS_CHARACTER', '分析人物须有准确名称、身份、表演特征与目标。', null, 'G7');
-    if ([...candidate.analysis.sellingPoints, ...candidate.analysis.visualKeywords].some(item => !clean(item))) add('ANALYSIS_ARRAY_ITEM', '卖点与视觉关键词须为有效文字。', null, 'G7');
-  }
+  errors.push(...outlineErrors(candidate));
   const assets = candidate?.assets;
   if (!isObject(assets) || [...ASSET_KINDS, 'characterChecklist', 'characterDifferenceMatrix'].some(key => !Array.isArray(assets[key]))) add('ASSETS_SHAPE', '参考素材须包含四类素材数组、人物清单与差异矩阵；不需要人物图时相关数组可为空。', null, 'G1');
   const assetItems = ASSET_KINDS.flatMap(kind => Array.isArray(assets?.[kind]) ? assets[kind] : []);

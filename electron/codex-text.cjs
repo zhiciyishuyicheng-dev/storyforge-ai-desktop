@@ -17,7 +17,7 @@ const TEXT_CONFIG = Object.freeze([
   'features.view_image=false', 'web_search="disabled"', 'mcp_servers={}',
   'project_doc_max_bytes=0',
 ]);
-const TEXT_INSTRUCTIONS = 'You are StoryForge, a text-only story analysis and storyboard generator. Follow the supplied creative specification and return exactly one complete JSON object. Never call tools, read files, browse, execute code, generate images, use plugins or MCP, request permissions, or obtain credentials. All necessary material is supplied as text. Do not output hidden reasoning, commentary, Markdown fences, or text outside JSON. Use only the current ChatGPT subscription; never fall back to an API key or another provider.';
+const TEXT_INSTRUCTIONS = 'You are XStudio, a text-only storyboard outline and storyboard generator. Follow the supplied creative specification and return exactly one complete JSON object. Never call tools, read files, browse, execute code, generate images, use plugins or MCP, request permissions, or obtain credentials. All necessary material is supplied as text. Do not output hidden reasoning, commentary, Markdown fences, or text outside JSON. Use only the current ChatGPT subscription; never fall back to an API key or another provider.';
 
 function textError(code, message) { return Object.assign(new Error(message), { code }); }
 function safeString(value, maximum = 200) {

@@ -7,6 +7,7 @@ const defaultPolicy = require('./storyboard-policy.cjs');
 const { VERSION, SKILL_SHA256, SKILL_TEXT } = require('./storyboard-skill.cjs');
 const { stageSkillReferences } = require('./stage-skills.cjs');
 const { createWorkflowTiming } = require('./workflow-timing.cjs');
+const { ensureStoryboardOutline, migrateLegacyOutline } = require('./storyboard-outline.cjs');
 
 function workflowError(message, code, details = {}) {
   return Object.assign(new Error(message), { code, ...details });
@@ -31,6 +32,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
     const timing = createWorkflowTiming({ script, onProgress, now, maxRepairs, provider, model, reasoningEffort,
       skillChars: (context.stageSkills.storyboard?.content.length ?? SKILL_TEXT.length) + (context.stageSkills.assets?.content.length || 0) });
     const publishCandidate = (data, audit, auditSummary, repairCount, auditIgnored = false) => {
+      ensureStoryboardOutline(data);
       data.storyboard.skillVersion = VERSION;
       data.storyboard.unifiedSuffix = '';
       data.storyboard.auditSummary = auditSummary;
@@ -79,7 +81,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
 
       for (;;) {
         const candidate = response.data && typeof response.data === 'object' && !Array.isArray(response.data)
-          ? structuredClone(response.data) : null;
+          ? migrateLegacyOutline(structuredClone(response.data)) : null;
         // No model-supplied pass marker or fabricated retry count is authoritative.
         if (candidate?.storyboard) {
           delete candidate.storyboard.auditSummary;

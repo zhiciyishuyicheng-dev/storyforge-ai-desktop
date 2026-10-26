@@ -31,18 +31,40 @@ test('the bundled specification supplies all 60 distinct audit rules in canonica
   assert.ok(RULE_LABELS.F8.includes('同块相邻镜头'));
 });
 
-test('workflow schema requests analysis, storyboard and assets directly without intermediate adapted outputs', () => {
+test('workflow schema requests a per-block outline, storyboard and assets without story analysis', () => {
   for (const prompt of [SYSTEM_PROMPT, AUDIT_SYSTEM_PROMPT]) {
-    const schemaStart = prompt.indexOf('\n{\n  "analysis":');
+    const schemaStart = prompt.indexOf('\n{\n  "outline":');
     assert.notEqual(schemaStart, -1);
     const schemaEnd = prompt.indexOf('\n\n独立审计输出契约：', schemaStart);
     const schema = JSON.parse(prompt.slice(schemaStart + 1, schemaEnd < 0 ? undefined : schemaEnd));
-    assert.deepEqual(Object.keys(schema), ['analysis', 'storyboard', 'assets']);
+    assert.deepEqual(Object.keys(schema), ['outline', 'storyboard', 'assets']);
+    assert.deepEqual(schema.outline, { title: '分镜大纲' });
+    assert.equal(typeof schema.storyboard.shots[0].outline, 'string');
+    assert.equal(typeof schema.storyboard.shots[0].scene, 'string');
+    assert.equal(Object.hasOwn(schema, 'analysis'), false);
+    assert.ok(prompt.includes('生成块 | 预计时长 | 场景 | 剧情内容与镜头重点'));
     assert.ok(prompt.includes('不生成分集大纲，不输出中间改编稿，不生成episodes或script字段'));
     assert.ok(prompt.includes('场次、时空与原声始终直接核对originalScript'));
     assert.equal(prompt.includes('analysis、episodes、script 是同一范围的辅助输出'), false);
   }
   assert.ok(AUDIT_SYSTEM_PROMPT.includes('旧候选中的episodes或script冗余字段不作为事实来源，也不要求补齐'));
+});
+
+test('built-in and uploaded Skill generation, audit and repair keep the outline on the final blocks', () => {
+  const custom = { stageSkills: { storyboard: { name: '导演.md', content: '采用水彩风，按剧情自然分块。' } } };
+  for (const context of [{}, custom]) {
+    const system = makeSystemPrompt(context);
+    const audit = makeAuditSystemPrompt(context);
+    const repair = makeRepairPrompt('甲走进会议室。', {}, { context });
+    for (const prompt of [system, audit]) {
+      assert.match(prompt, /顶层(?:只输出|仅)\s*outline、storyboard、assets/u);
+      assert.match(prompt, /生成块 \| 预计时长 \| 场景 \| 剧情内容与镜头重点/u);
+      assert.match(prompt, /scene与outline/u);
+    }
+    assert.match(makeUserPrompt('甲走进会议室。', context), /分镜大纲/u);
+    assert.match(repair, /同步更新.*scene与outline/u);
+    assert.match(repair, /不再输出故事分析/u);
+  }
 });
 
 test('source text containing quotes, role delimiters and embedded commands remains one exact data string', () => {
