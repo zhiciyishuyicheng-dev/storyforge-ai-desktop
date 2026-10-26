@@ -18,17 +18,40 @@ const models = [
   { id: 'model-b', model: 'test-gpt-b', displayName: 'Test GPT B', isDefault: false, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast' }] },
 ];
 const ready = () => ({ available: true, authenticated: true, configured: true, imageGeneration: false, models: structuredClone(models) });
-const data = () => ({ analysis: { characters: [{ name: '阿宁' }], coreConflict: '阿宁读信' }, storyboard: { shots: [{ no: '01', duration: 5, prompt: '@阿宁 坐在书桌前读信。' }] }, assets: { characters: [{ name: '阿宁', prompt: '阿宁人物参考图' }] } });
+const data = () => ({ analysis: { characters: [{ name: '阿宁' }], coreConflict: '阿宁读信' }, storyboard: { shots: [{ no: '01', duration: 5, scene: '书房', outline: '阿宁读信发现线索。镜头停在落款。', prompt: '@阿宁 坐在书桌前读信。' }] }, assets: { characters: [{ name: '阿宁', prompt: '阿宁人物参考图' }] } });
+
+// Test fixtures model each backend stage independently: outline responses contain
+// no production storyboard or asset prompts, and asset responses contain no shots.
+function stageFixtureData(data, stage) {
+  if (stage === 'outline' && data?.storyboard) {
+    const outline = outlineUI.buildStoryboardOutline(data.storyboard, data.assets);
+    return { outline: { title: '分镜大纲', rows: outline.rows.map(({ no, duration, scene, content }) => ({ no, duration, scene, content })) } };
+  }
+  if (stage === 'assets' && data?.assets) return { assets: structuredClone(data.assets) };
+  if (stage === 'storyboard' && data?.assets) {
+    const response = structuredClone(data);
+    for (const group of ['characters', 'scenes', 'groups', 'props']) {
+      for (const asset of response.assets[group] || []) delete asset.prompt;
+    }
+    return response;
+  }
+  return data;
+}
 
 function harness(api = {}) {
   const storage = new Map();
+  const transport = { ...api };
+  if (api.generateWorkflow) transport.generateWorkflow = async (script, options) => {
+    const response = await api.generateWorkflow(script, options);
+    return response ? { ...response, stage: options.stage, data: stageFixtureData(response.data, options.stage) } : response;
+  };
   const intervals = new Map();
   const context = vm.createContext({
     ...skillHistory,
     ...outlineUI,
     ...durations, ...references, ...generation, ...workflowProgress, ...comfyUI, ...h3,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
-    window: { storyforgeAI: api, setTimeout: () => 1, setInterval: callback => { const id = Symbol(); intervals.set(id, callback); return id; }, clearInterval: id => intervals.delete(id) },
+    window: { storyforgeAI: transport, setTimeout: () => 1, setInterval: callback => { const id = Symbol(); intervals.set(id, callback); return id; }, clearInterval: id => intervals.delete(id) },
     document: { querySelector: () => null, querySelectorAll: () => [] }, structuredClone,
   });
   vm.runInContext(renderer, context);
@@ -98,11 +121,13 @@ test('GPT 大纲分镜不要求 DeepSeek 密钥或订阅生图能力，锁定 Sk
   assert.equal(sent.model, 'test-gpt-a');
   assert.equal(sent.reasoningEffort, 'xhigh');
   assert.equal(sent.stageSkills.storyboard.content, '每块15秒');
-  assert.equal(h.run('project.activeStep'), 'assets');
+  assert.equal(h.run('project.activeStep'), 'analysis');
+  assert.equal(sent.stage, 'outline');
+  assert.deepEqual(h.snapshot('Object.keys(project.outputs)'), ['analysis']);
   assert.equal(h.run('project.aiGeneration.provider'), 'codex-subscription');
   assert.equal(h.run('project.aiGeneration.reasoningEffort'), 'xhigh');
   assert.equal(h.run('Boolean(globalThis.deepseekSettingsOpened)'), false);
-  assert.match(h.run('project.outputs.analysis.subtitle'), /模型：test-gpt-a · 思考 xhigh/);
+  assert.match(h.run('project.outputs.analysis.subtitle'), /模型：test-gpt-a/);
   assert.doesNotMatch(h.run('project.outputs.analysis.subtitle'), /DeepSeek/);
   assert.equal(h.run('project.outputs.analysis.title'), '分镜大纲');
   assert.match(h.run('project.outputs.analysis.body'), /生成块|预计时长|剧情内容与镜头重点/);
@@ -123,10 +148,11 @@ test('GPT 新响应直接交付分镜大纲，不需要故事分析字段', asyn
   assert.deepEqual(h.snapshot('project.outputs.analysis.outline.rows.map(({no,duration,scene,content}) => ({no,duration,scene,content}))'), [
     { no: '01', duration: 5, scene: '书房', content: result.storyboard.shots[0].outline },
   ]);
-  assert.deepEqual(h.snapshot('project.completed'), ['analysis', 'storyboard']);
+  assert.deepEqual(h.snapshot('project.completed'), ['analysis']);
   assert.match(h.run('project.outputs.analysis.subtitle'), /模型：test-gpt-a/);
   assert.doesNotMatch(h.run('project.outputs.analysis.body'), /故事定位|主要人物|核心卖点/);
-  assert.equal(h.run('project.outputs.storyboard.prompts[0]'), result.storyboard.shots[0].prompt);
+  assert.equal(h.run('project.outputs.storyboard'), undefined);
+  assert.equal(h.run('project.outputs.assets'), undefined);
 });
 
 test('未指定 GPT 模型时使用账号默认模型与默认强度，并保留在项目中', async () => {
@@ -144,7 +170,7 @@ test('模型或思考强度下线时明确提示并保留旧成果，不自动�
     let calls = 0;
     const h = harness({ getCodexTextStatus: async () => ready(), generateWorkflow: async () => { calls += 1; throw new Error('不应调用'); } });
     selectSubscription(h, effort, model);
-    h.run('project.outputs = {analysis:{body:"旧分析"},storyboard:{body:"旧分镜"}}; project.activeStep = "storyboard";');
+    h.run('project.outputs = {analysis:makeStoryboardOutlineOutput({rows:[{no:"01",duration:5,scene:"书房",content:"阿宁读信"}],count:1,totalDuration:5,unknownDurationCount:0}),storyboard:{body:"旧分镜"}}; project.activeStep = "storyboard";');
     assert.match(h.run('storyboardGenerationTemplate()'), /当前不可用|当前不支持/);
     await h.run('startGeneration()');
     assert.equal(calls, 0);
@@ -199,7 +225,7 @@ test('GPT 全流程保留本次模型强度和两份 Skill 快照，自动生成
   const output = data();
   const names = ['阿宁', '阿岚'];
   output.analysis.characters = names.map(name => ({ name }));
-  output.storyboard.shots = names.map((name, index) => ({ no: String(index + 1).padStart(2, '0'), duration: 6, prompt: `@${name} 坐在书桌前读信。` }));
+  output.storyboard.shots = names.map((name, index) => ({ no: String(index + 1).padStart(2, '0'), duration: 6, scene: '书房', outline: `${name}读信。近景停在信纸。`, prompt: `@${name} 坐在书桌前读信。` }));
   output.assets.characters = names.map(name => ({ name, prompt: `${name} 人物参考图` }));
   const skills = { storyboard: { name: '本次分镜.md', content: '每块6秒，按原文顺序设计。' }, assets: { name: '本次资产.md', content: '启动时锁定的电影素材要求。' } };
   const h = harness({
@@ -220,7 +246,13 @@ test('GPT 全流程保留本次模型强度和两份 Skill 快照，自动生成
   h.context.skills = structuredClone(skills);
   h.run('project.generationSkills = normalizeGenerationSkills(skills); project.autoRunToVideo = true; seedanceStatus.configured = true; seedanceStatus.generationMode = "confirm";');
   await h.run('startGeneration()');
-  assert.equal(calls.workflows.length, 1);
+  assert.deepEqual(calls.workflows.map(call => call.options.stage), ['outline', 'storyboard', 'assets']);
+  for (const call of calls.workflows) {
+    assert.equal(call.options.provider, 'codex-subscription');
+    assert.equal(call.options.model, 'test-gpt-a');
+    assert.equal(call.options.reasoningEffort, 'xhigh');
+    assert.deepEqual(call.options.stageSkills, skills);
+  }
   const options = calls.workflows[0].options;
   assert.equal(options.provider, 'codex-subscription');
   assert.equal(options.model, 'test-gpt-a');
@@ -245,7 +277,7 @@ test('GPT 全流程保留本次模型强度和两份 Skill 快照，自动生成
   assert.equal(h.run('Boolean(globalThis.deepseekSettingsOpened)'), false);
 });
 
-test('停止或切换项目会丢弃 GPT 登录检测的迟到结果，不改写新项目或发送生成请求', async () => {
+test('显式停止会取消 GPT 检测，切换项目则继续原项目生成且不改写新项目', async () => {
   for (const operation of ['stop', 'switch']) {
     let finish, entered;
     const reached = new Promise(resolve => { entered = resolve; });
@@ -263,12 +295,21 @@ test('停止或切换项目会丢弃 GPT 登录检测的迟到结果，不改写
     const before = h.snapshot('({id:project.id,settings:project.storyboardGeneration,outputs:project.outputs,completed:project.completed})');
     finish(ready());
     await run;
-    assert.deepEqual(calls.cancellations, [ids]);
-    assert.equal(calls.workflows, 0);
     assert.deepEqual(h.snapshot('({id:project.id,settings:project.storyboardGeneration,outputs:project.outputs,completed:project.completed})'), before);
-    assert.equal(h.run('owner.workflowProgress.status'), 'stopped');
-    assert.equal(h.run('owner.storyboardGeneration.model'), '');
-    assert.equal(h.run('owner.storyboardGeneration.reasoningEffort'), '');
+    if (operation === 'stop') {
+      assert.deepEqual(calls.cancellations, [ids]);
+      assert.equal(calls.workflows, 0);
+      assert.equal(h.run('owner.workflowProgress.status'), 'stopped');
+      assert.equal(h.run('owner.storyboardGeneration.model'), '');
+      assert.equal(h.run('owner.storyboardGeneration.reasoningEffort'), '');
+    } else {
+      assert.deepEqual(calls.cancellations, []);
+      assert.equal(calls.workflows, 1);
+      assert.equal(h.run('owner.workflowProgress.status'), 'completed');
+      assert.equal(h.run('owner.storyboardGeneration.model'), 'test-gpt-a');
+      assert.equal(h.run('owner.storyboardGeneration.reasoningEffort'), 'medium');
+      assert.equal(h.run('owner.outputs.analysis.generatedStage'), 'outline');
+    }
     assert.equal(h.run('project.running'), false);
   }
 });

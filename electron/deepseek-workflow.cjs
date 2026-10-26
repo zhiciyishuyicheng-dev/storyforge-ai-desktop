@@ -8,6 +8,7 @@ const { VERSION, SKILL_SHA256, SKILL_TEXT } = require('./storyboard-skill.cjs');
 const { stageSkillReferences } = require('./stage-skills.cjs');
 const { createWorkflowTiming } = require('./workflow-timing.cjs');
 const { ensureStoryboardOutline, migrateLegacyOutline } = require('./storyboard-outline.cjs');
+const { STAGES, normalizeConfirmedOutline, confirmedOutlineErrors, stageContext, runIndependentStage } = require('./generation-stages.cjs');
 
 function workflowError(message, code, details = {}) {
   return Object.assign(new Error(message), { code, ...details });
@@ -26,12 +27,20 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
 
   return async function generateWorkflow(script, options = {}) {
     if (typeof script !== 'string' || !script.trim()) throw workflowError('剧本不能为空。', 'EMPTY_SCRIPT');
-    const context = normalizeContext(options);
+    let context = normalizeContext(options);
+    if (options?.stage !== undefined && !STAGES.has(options.stage)) throw workflowError('无效的生成步骤。', 'INVALID_WORKFLOW_STAGE');
+    if (context.stage === 'outline' || context.stage === 'assets') return runIndependentStage(script, context, { request, maxRepairs, onProgress, now, provider, model, reasoningEffort });
+    if (context.stage === 'storyboard') {
+      const inputSha256 = context.confirmedOutline?.verification?.inputSha256;
+      if (typeof inputSha256 === 'string' && inputSha256 !== createHash('sha256').update(script).digest('hex')) throw workflowError('原始剧本已更改，请先重新生成并确认分镜大纲。', 'STALE_CONFIRMED_OUTLINE');
+      context = stageContext({ ...context, confirmedOutline: normalizeConfirmedOutline(context.confirmedOutline, context) });
+    }
     const originalScript = script;
     const records = [];
     const timing = createWorkflowTiming({ script, onProgress, now, maxRepairs, provider, model, reasoningEffort,
       skillChars: (context.stageSkills.storyboard?.content.length ?? SKILL_TEXT.length) + (context.stageSkills.assets?.content.length || 0) });
     const publishCandidate = (data, audit, auditSummary, repairCount, auditIgnored = false) => {
+      if (context.stage === 'storyboard') data.outline = structuredClone(context.confirmedOutline);
       ensureStoryboardOutline(data);
       data.storyboard.skillVersion = VERSION;
       data.storyboard.unifiedSuffix = '';
@@ -55,7 +64,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
         total_tokens: usageRecords.reduce((sum, record) => sum + (Number(record.usage.total_tokens) || 0), 0),
       } : null;
       const progress = timing.complete({ auditIgnored });
-      return { data, usage, provider, reasoningEffort, model: records.at(-1)?.model || model, progress };
+      return { ...(context.stage ? { stage: context.stage } : {}), data, usage, provider, reasoningEffort, model: records.at(-1)?.model || model, progress };
     };
     const invoke = async (buildMessages, phase, repairCount) => {
       const preparationStarted = timing.prepare();
@@ -92,7 +101,8 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
         let validationStarted = now();
         const validation = policy.validateCandidate(candidate, { script: originalScript, context });
         timing.addValidation(validationStarted);
-        const localErrors = [...validation.errors];
+        const confirmedErrors = confirmedOutlineErrors(candidate, context);
+        const localErrors = [...validation.errors, ...confirmedErrors];
         if (response.truncated) localErrors.push({ code: 'TRUNCATED_RESPONSE', message: '候选被输出长度上限截断，不能缩减指定范围后伪装完整交付。' });
         if (!candidate) localErrors.push({ code: 'INVALID_JSON', message: '候选不是有效的工作流 JSON，必须重新生成。' });
         let audit = null;
@@ -126,7 +136,7 @@ function createWorkflowRunner({ request, policy = defaultPolicy, maxRepairs = 1,
         if (candidate && !allPublishedBlocksAccepted) lastErrors.push({ code: 'UNAPPROVED_BLOCKS', message: '正式结果只能包含独立审计通过的生成块；受阻内容须移至阻塞与顺延记录后重新审计。' });
         if (!lastErrors.length) lastErrors.push({ code: 'AUDIT_NOT_PASSED', message: '独立审计未确认全部适用检查通过。' });
         if (repairCount >= maxRepairs) {
-          if (repairCount >= 1 && !response.truncated && policy.canPublishIgnoredCandidate(candidate, { context })
+          if (repairCount >= 1 && !response.truncated && !confirmedErrors.length && policy.canPublishIgnoredCandidate(candidate, { context })
             && !policy.hasGenuineBlockers(candidate, audit)) {
             return publishCandidate(candidate, audit, policy.buildIgnoredAuditSummary(candidate, audit, {
               repairCount, context, issues: lastErrors,

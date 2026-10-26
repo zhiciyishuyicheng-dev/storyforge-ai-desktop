@@ -14,8 +14,31 @@ import * as workflowProgress from './workflow-progress.js';
 const mainSource = fs.readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 const rendererSource = mainSource.slice(0, mainSource.lastIndexOf('\nrender();')).replace(/^import .*;\r?\n/gm, '');
 
+// Test fixtures model each backend stage independently: outline responses contain
+// no production storyboard or asset prompts, and asset responses contain no shots.
+function stageFixtureData(data, stage) {
+  if (stage === 'outline' && data?.storyboard) {
+    const outline = outlineUI.buildStoryboardOutline(data.storyboard, data.assets);
+    return { outline: { title: '分镜大纲', rows: outline.rows.map(({ no, duration, scene, content }) => ({ no, duration, scene, content })) } };
+  }
+  if (stage === 'assets' && data?.assets) return { assets: structuredClone(data.assets) };
+  if (stage === 'storyboard' && data?.assets) {
+    const response = structuredClone(data);
+    for (const group of ['characters', 'scenes', 'groups', 'props']) {
+      for (const asset of response.assets[group] || []) delete asset.prompt;
+    }
+    return response;
+  }
+  return data;
+}
+
 function harness(api = {}) {
   const storage = new Map();
+  const transport = { ...api };
+  if (api.generateWorkflow) transport.generateWorkflow = async (script, options) => {
+    const response = await api.generateWorkflow(script, options);
+    return response ? { ...response, stage: options.stage, data: stageFixtureData(response.data, options.stage) } : response;
+  };
   const intervals = new Map();
   const context = vm.createContext({
     ...skillHistory,
@@ -25,7 +48,7 @@ function harness(api = {}) {
     ...generation,
     ...workflowProgress, ...comfyUI, ...h3,
     localStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
-    window: { storyforgeAI: api, setTimeout: () => 1, setInterval: (callback) => { const id = Symbol('timer'); intervals.set(id, callback); return id; }, clearInterval: (id) => intervals.delete(id) },
+    window: { storyforgeAI: transport, setTimeout: () => 1, setInterval: (callback) => { const id = Symbol('timer'); intervals.set(id, callback); return id; }, clearInterval: (id) => intervals.delete(id) },
     document: { querySelector: () => null, querySelectorAll: () => [] },
     structuredClone,
   });
@@ -46,7 +69,7 @@ function fixture({ partial = false, ignored = false, duration = 3 } = {}) {
       skillVersion: '2.1',
       unifiedSuffix: '',
       shots: [{
-        no: '01', title: '阿宁看信', duration,
+        no: '01', title: '阿宁看信', duration, scene: '书房（白天）', outline: '阿宁读信发现落款。近景停在手中信纸。',
         uploads: [{ ref: '@Image1', asset: '阿宁', purpose: '人物参考' }],
         segments: [{ time: `[0-${duration}秒]`, visual: '阿宁看着手中的信纸。' }],
         prompt: `🎬 生成块 01（时长：${duration}秒）\n本段总时长：${duration}秒\n人物：@Image1 是阿宁\n场景：书房（白天）\n\n（无对白字幕，无BGM，CG写实）\n\n空间与位置保持稳定：阿宁站在书桌前。\n\n[0-${duration}秒] 近景，阿宁看着手中的信纸。`,
@@ -65,7 +88,8 @@ function fixture({ partial = false, ignored = false, duration = 3 } = {}) {
 }
 
 function loadConfirmedProject(h) {
-  h.run(`project.script = '锁定的原文'; project.activeStep = 'storyboard'; project.outputs = { storyboard: { prompts: ['旧分镜'], body: '旧分镜' }, assets: { promptItems: [] } }; project.completed = ['analysis', 'storyboard', 'assets']; project.assetGeneration.items = [{ name: '旧素材', files: [{ localPath: 'C:/old.png' }] }]; project.videoGeneration.items = [{ status: 'success', localPath: 'C:/old.mp4' }];`);
+  h.context.confirmedFixture = fixture();
+  h.run(`project.script = '锁定的原文'; project.activeStep = 'storyboard'; project.outputs = { analysis: makeStoryboardOutlineOutput(buildStoryboardOutline(confirmedFixture.storyboard, confirmedFixture.assets)), storyboard: { prompts: ['旧分镜'], body: '旧分镜' }, assets: { promptItems: [] } }; project.completed = ['analysis', 'storyboard', 'assets']; project.assetGeneration.items = [{ name: '旧素材', files: [{ localPath: 'C:/old.png' }] }]; project.videoGeneration.items = [{ status: 'success', localPath: 'C:/old.mp4' }];`);
 }
 
 function skillDocument(name = '分镜要求.md', content = '请按原文顺序生成分镜。') {
@@ -248,6 +272,137 @@ test('单张和批量实际 GPT 生图使用运行开始锁定的资产 Skill，
     assert.equal(workflowCalls, 0);
     assert.equal(h.run('project.assetGeneration.generatedCount'), requests.length);
   }
+});
+
+test('关闭全流程时只生成分镜大纲，每次确认才请求下一文本阶段并停在当前步骤', async () => {
+  const calls = { workflows: [], images: [], videos: [] };
+  const response = fixture({ duration: 6 });
+  const h = harness({
+    generateWorkflow: async (_script, options) => { calls.workflows.push(structuredClone(options)); return { data: structuredClone(response) }; },
+    generateCodexImage: async options => { calls.images.push(options); throw new Error('未经确认不能自动生图'); },
+    createSeedanceTask: async options => { calls.videos.push(options); throw new Error('未经确认不能自动生成视频'); },
+  });
+  h.run('project.script = "阿宁在书房读信"; project.autoRunToVideo = false');
+  await h.run('startGeneration()');
+  assert.deepEqual(calls.workflows.map(call => call.stage), ['outline']);
+  assert.deepEqual(h.snapshot('Object.keys(project.outputs)'), ['analysis']);
+  assert.deepEqual(h.snapshot('project.completed'), ['analysis']);
+  assert.equal(h.run('project.activeStep'), 'analysis');
+  assert.equal(h.run('project.running'), false);
+  assert.match(h.run('outputTemplate()'), /确认大纲/);
+  const outline = h.snapshot('project.outputs.analysis.outline');
+
+  await h.run('confirmAndGenerateNextStage()');
+  assert.deepEqual(calls.workflows.map(call => call.stage), ['outline', 'storyboard']);
+  assert.deepEqual(h.snapshot('project.outputs.analysis.outline'), outline);
+  assert.equal(h.run('project.activeStep'), 'storyboard');
+  assert.equal(h.run('project.outputs.assets'), undefined);
+  assert.equal(h.run('project.running'), false);
+  assert.match(h.run('outputTemplate()'), /确认分镜/);
+  assert.ok(JSON.stringify(calls.workflows[1].confirmedOutline).includes(outline.rows[0].content));
+
+  await h.run('confirmAndGenerateNextStage()');
+  assert.deepEqual(calls.workflows.map(call => call.stage), ['outline', 'storyboard', 'assets']);
+  assert.equal(h.run('project.activeStep'), 'assets');
+  assert.equal(h.run('project.running'), false);
+  assert.equal(h.run('project.outputs.assets.promptItems[0].name'), '阿宁');
+  assert.equal(calls.workflows[2].confirmedStoryboard.storyboard.shots[0].prompt, response.storyboard.shots[0].prompt);
+  assert.equal(calls.images.length, 0);
+  assert.equal(calls.videos.length, 0);
+  assert.equal(h.run('autoPipelineRun'), null);
+});
+
+test('普通模式重新生成大纲只更新第一步，既有分镜、图片和视频保留待用户确认', async () => {
+  const calls = [];
+  const h = harness({ generateWorkflow: async (_script, options) => { calls.push(options.stage); return { data: fixture({ duration: 6 }) }; } });
+  loadConfirmedProject(h);
+  const before = h.snapshot('[project.outputs.storyboard,project.outputs.assets,project.assetGeneration,project.videoGeneration]');
+  h.run('project.activeStep = "analysis"');
+  await h.run('startGeneration()');
+  assert.deepEqual(calls, ['outline']);
+  assert.deepEqual(h.snapshot('[project.outputs.storyboard,project.outputs.assets,project.assetGeneration,project.videoGeneration]'), before);
+  assert.equal(h.run('project.outputs.analysis.generatedStage'), 'outline');
+  assert.equal(h.run('project.activeStep'), 'analysis');
+  assert.deepEqual(h.snapshot('project.completed'), ['analysis']);
+});
+
+test('缺少已生成大纲或分镜时不能越步发起下一阶段模型请求', async () => {
+  let calls = 0;
+  const h = harness({ generateWorkflow: async () => { calls += 1; return { data: fixture() }; } });
+  h.run('project.script = "原文"; project.activeStep = "storyboard"');
+  await h.run('startGeneration()');
+  assert.equal(calls, 0);
+  assert.match(h.context.lastToast, /大纲/);
+  h.run('project.activeStep = "assets"');
+  await h.run('startGeneration()');
+  assert.equal(calls, 0);
+  assert.match(h.context.lastToast, /分镜/);
+});
+
+test('打开全流程开关本身不会生成，确认下一步也不会意外启动整条流水线', async () => {
+  const calls = [];
+  const h = harness({ generateWorkflow: async (_script, options) => { calls.push(structuredClone(options)); return { data: fixture({ duration: 6 }) }; } });
+  loadConfirmedProject(h);
+  h.run('project.activeStep = "analysis"; setAutoRunToVideo(true)');
+  assert.equal(calls.length, 0);
+  await h.run('confirmAndGenerateNextStage()');
+  assert.deepEqual(calls.map(call => call.stage), ['storyboard']);
+  assert.equal(calls[0].autoRunToVideo === true, false);
+  assert.equal(h.run('project.autoRunToVideo'), true);
+  assert.equal(h.run('autoPipelineRun'), null);
+  assert.equal(h.run('project.activeStep'), 'storyboard');
+});
+
+test('无效大纲响应不能覆盖原结果或偷偷补出后续阶段', async () => {
+  let calls = 0;
+  const h = harness({ generateWorkflow: async () => { calls += 1; return { data: { outline: { rows: [] } } }; } });
+  loadConfirmedProject(h);
+  h.run('project.activeStep = "analysis"');
+  const before = h.snapshot('[project.outputs,project.completed,project.assetGeneration,project.videoGeneration]');
+  await h.run('startGeneration()');
+  assert.equal(calls, 1);
+  assert.deepEqual(h.snapshot('[project.outputs,project.completed,project.assetGeneration,project.videoGeneration]'), before);
+  assert.equal(h.run('project.activeStep'), 'analysis');
+  assert.equal(h.run('project.running'), false);
+  assert.match(h.run('project.workflowError'), /大纲/);
+});
+
+test('修改原文或重新生成大纲后，旧分镜不能绕过用户确认直接生成资产', async () => {
+  const calls = [];
+  const h = harness({ generateWorkflow: async (_script, options) => { calls.push(options.stage); return { data: fixture({ duration: 6 }) }; } });
+  h.run('project.script = "阿宁在书房看信"');
+  await h.run('startGeneration()');
+  h.run('project.script = "阿宁在门外看信"; project.activeStep = "storyboard"');
+  await h.run('startGeneration()');
+  assert.deepEqual(calls, ['outline']);
+  assert.match(h.context.lastToast, /剧本已更改/);
+  h.run('project.activeStep = "analysis"');
+  await h.run('startGeneration()');
+  await h.run('confirmAndGenerateNextStage()');
+  const oldBoard = h.snapshot('project.outputs.storyboard');
+  h.run('project.activeStep = "analysis"');
+  await h.run('startGeneration()');
+  h.run('project.activeStep = "assets"');
+  await h.run('startGeneration()');
+  assert.deepEqual(calls, ['outline', 'outline', 'storyboard', 'outline']);
+  assert.match(h.context.lastToast, /大纲已更新/);
+  assert.deepEqual(h.snapshot('project.outputs.storyboard'), oldBoard);
+});
+
+test('独立大纲及等待确认状态重载后保持，不因旧分镜或自动开关而发起请求', async () => {
+  let calls = 0;
+  const h = harness({ generateWorkflow: async () => { calls += 1; return { data: fixture({ duration: 6 }) }; } });
+  loadConfirmedProject(h);
+  h.run('project.activeStep = "analysis"');
+  await h.run('startGeneration()');
+  const outline = h.snapshot('project.outputs.analysis.outline');
+  h.run('project.autoRunToVideo = true; project = normalizeProject(JSON.parse(JSON.stringify(project)))');
+  assert.equal(calls, 1);
+  assert.equal(h.run('project.activeStep'), 'analysis');
+  assert.equal(h.run('project.running'), false);
+  assert.equal(h.run('project.outputs.analysis.generatedStage'), 'outline');
+  assert.deepEqual(h.snapshot('currentStoryboardOutline()'), outline);
+  assert.match(h.run('manualStageConfirmationTemplate()'), /确认大纲/);
 });
 
 test('制作流程仅保留四步，编号、按钮与进度一致', () => {
@@ -510,10 +665,10 @@ test('部分交付停在审计结果且不将整篇分镜标为完成', async ()
   assert.match(h.run('outputTemplate()'), /部分通过 · 存在阻塞/);
   h.run('project.activeStep = "assets"');
   assert.match(h.run('outputTemplate()'), /当前可用素材和视频仅对应已通过的独立生成块/);
-  assert.equal(h.run('project.outputs.assets.promptItems[0].name'), '阿宁');
+  assert.deepEqual(h.snapshot('project.outputs.assets.promptItems'), []);
 });
 
-test('请求和审计期间保留全部已确认成果，成功后一次替换', async () => {
+test('请求和审计期间保留成果，新分镜完成后保留历史成片并等待确认', async () => {
   let resolve;
   const pending = new Promise((done) => { resolve = done; });
   const h = harness({ generateWorkflow: () => pending });
@@ -525,9 +680,11 @@ test('请求和审计期间保留全部已确认成果，成功后一次替换',
   resolve({ data: fixture(), model: 'deepseek-flash' });
   await run;
   assert.equal(h.run('project.outputs.storyboard.skillVersion'), '2.1');
-  assert.equal(h.run('project.activeStep'), 'assets');
-  assert.equal(h.run('project.assetGeneration.items[0].name'), '阿宁');
-  assert.equal(h.run('project.videoGeneration.items.length'), 0);
+  assert.equal(h.run('project.activeStep'), 'storyboard');
+  assert.deepEqual(h.snapshot('project.assetGeneration'), previous[2]);
+  assert.equal(h.run('getSelectedVideoVersion(project.videoGeneration.items[0]).localPath'), previous[3].items[0].localPath);
+  assert.equal(h.run('project.videoGeneration.items[0].needsGeneration'), true);
+  assert.equal(h.run('project.videoGeneration.items[0].status'), 'pending');
   assert.deepEqual(h.snapshot('project.completed'), ['analysis', 'storyboard']);
 });
 
@@ -540,7 +697,7 @@ test('审计或缺失信息失败持久展示说明，保留旧成果且不打�
     assert.deepEqual(h.snapshot('[project.outputs, project.completed, project.assetGeneration, project.videoGeneration]'), previous);
     assert.equal(h.run('project.activeStep'), 'storyboard');
     assert.equal(h.run('project.workflowError'), message);
-    assert.match(h.run('outputTemplate()'), /本次分镜未交付/);
+    assert.match(h.run('outputTemplate()'), /本次生成未交付/);
     assert.equal(h.context.settingsOpened, undefined);
   }
 });
@@ -602,15 +759,15 @@ test('忽略审计的对象、数字或空标题使用默认值，各阶段输�
   assert.equal(h.run('renderAIWorkflow(data).storyboard.title'), '用户分镜标题');
 });
 
-test('一次回炉后忽略审计失败进入视觉素材，并在素材与视频保留警告', async () => {
+test('一次回炉后忽略审计失败停在分镜等待确认，素材与视频仍保留警告', async () => {
   const h = harness({ generateWorkflow: async () => ({ data: fixture({ ignored: true }) }) });
   loadConfirmedProject(h);
   await h.run('startGeneration()');
-  assert.equal(h.run('project.activeStep'), 'assets');
+  assert.equal(h.run('project.activeStep'), 'storyboard');
   assert.deepEqual(h.snapshot('project.completed'), ['analysis', 'storyboard']);
   assert.equal(h.run('project.workflowError'), '');
-  assert.equal(h.run('project.assetGeneration.items[0].name'), '阿宁');
-  assert.match(h.context.lastToast, /自动回炉一次，审计未通过已忽略/);
+  assert.equal(h.run('project.assetGeneration.items[0].name'), '旧素材');
+  assert.match(h.context.lastToast, /等待你确认/);
   assert.match(h.run('outputTemplate()'), /审计未通过，已按设置忽略并继续/);
   h.run('project.activeStep = "storyboard"');
   const storyboard = h.run('outputTemplate()');
@@ -693,15 +850,15 @@ test('唯一文件名重排继续恢复旧图，新增同名身份不会重复�
   assert.equal(h.run('project.assetGeneration.items[1].files[0].localPath'), 'C:/legacy-aning.png');
 });
 
-test('生成等待提示只承诺回炉一次并说明失败继续，初始进度上限为一次', () => {
+test('分镜生成等待提示只做当前阶段并等待确认，审计回炉上限为一次', () => {
   const h = harness();
-  h.run('project.running = true; workflowRun = { ownerProject: project }');
-  assert.match(h.run('outputTemplate()'), /最多自动回炉一次/);
-  assert.match(h.run('outputTemplate()'), /回炉后仍未通过将保留警告并继续下一步/);
+  h.run('project.running = true; project.activeStep = "storyboard"; workflowRun = { ownerProject: project, stage: "storyboard" }');
+  assert.match(h.run('outputTemplate()'), /本次只生成当前步骤/);
+  assert.match(h.run('outputTemplate()'), /等待你确认/);
   assert.match(h.run('workflowProgressTemplate()'), /自动回炉 0 \/ 1 次/);
 });
 
-test('切换项目后拒绝迟到的生成结果', async () => {
+test('切换项目只改变查看位置，后台分镜结果保存回原项目', async () => {
   let resolve;
   const pending = new Promise((done) => { resolve = done; });
   const h = harness({ generateWorkflow: () => pending });
@@ -713,7 +870,9 @@ test('切换项目后拒绝迟到的生成结果', async () => {
   await run;
   assert.equal(h.run('project.id'), 'other');
   assert.deepEqual(h.snapshot('project.outputs'), {});
-  assert.equal(h.run('projectLibrary.projects[0].outputs.storyboard.prompts[0]'), '旧分镜');
+  assert.equal(h.run('projectLibrary.projects[0].outputs.storyboard.prompts[0]'), fixture().storyboard.shots[0].prompt);
+  assert.equal(h.run('projectLibrary.projects[0].running'), false);
+  assert.equal(h.run('projectLibrary.activeProjectId'), 'other');
 });
 
 test('Skill 短块在视频初始化和对齐后仍为3秒，提交前阻止实际请求', async () => {
@@ -817,25 +976,34 @@ test('失败后保留耗时，重启恢复中断状态且不持续增长', async
   assert.equal(h.run('restored.workflowProgress.elapsedMs'), 5000);
 });
 
-test('切换项目冻结旧进度并解绑；旧任务finally不清理新任务定时器', async () => {
+test('切换项目保留原任务进度，结束后才释放订阅且不会清理下一任务计时器', async () => {
   const listeners = [], requests = [];
   let unsubscribed = 0;
-  const h = harness({ onWorkflowProgress: (callback) => { listeners.push(callback); return () => { unsubscribed += 1; }; }, generateWorkflow: (_script, options) => new Promise((resolve) => requests.push({ options, resolve })) });
+  const h = harness({ onWorkflowProgress: callback => { listeners.push(callback); return () => { unsubscribed += 1; }; }, generateWorkflow: (_script, options) => new Promise(resolve => requests.push({ options, resolve })) });
   loadConfirmedProject(h);
   h.run(`projectLibrary.projects.push(createProject({ id: 'other', script: '另一段原文' }));`);
   const first = h.run('startGeneration()');
   listeners[0](progressFixture(requests[0].options));
   h.run(`switchProject('other')`);
-  assert.equal(h.run('projectLibrary.projects[0].workflowProgress.status'), 'stopped');
-  assert.equal(h.intervals.size, 0);
-  assert.equal(unsubscribed, 1);
-  const second = h.run('startGeneration()');
-  listeners[0](progressFixture(requests[0].options, 5, { status: 'completed', phase: 'completed' }));
-  assert.equal(h.run('project.workflowProgress.sequence'), 0);
+  assert.equal(h.run('projectLibrary.projects[0].workflowProgress.status'), 'running');
+  assert.equal(h.intervals.size, 1);
+  assert.equal(unsubscribed, 0);
+  await h.run('startGeneration()');
+  assert.equal(requests.length, 1);
+  assert.match(h.context.lastToast, /后台生成/);
+  listeners[0](progressFixture(requests[0].options, 5));
+  assert.equal(h.run('projectLibrary.projects[0].workflowProgress.sequence'), 5);
+  assert.equal(h.run('project.workflowProgress == null'), true);
   requests[0].resolve({ data: fixture() });
   await first;
-  assert.equal(h.intervals.size, 1);
+  assert.equal(h.intervals.size, 0);
   assert.equal(unsubscribed, 1);
+  assert.equal(h.run('project.id'), 'other');
+  const second = h.run('startGeneration()');
+  assert.equal(requests.length, 2);
+  listeners[0](progressFixture(requests[0].options, 99, { status: 'completed', phase: 'completed' }));
+  assert.equal(h.run('project.workflowProgress.sequence'), 0);
+  assert.equal(h.intervals.size, 1);
   requests[1].resolve({ data: fixture() });
   await second;
   assert.equal(h.intervals.size, 0);
@@ -1267,8 +1435,8 @@ test('后台生成分镜时可查看既有素材，等待提示与转圈只属�
   assert.equal(h.run('project.activeStep'), 'assets');
   assert.equal(h.run('generationRun'), token);
   assert.equal(h.run('project.running'), true);
-  assert.equal(h.run('runningGenerationStep(project)'), 'analysis');
-  assert.match(h.run('stepTemplate(steps[0])'), /class="step [^"]*running/);
+  assert.equal(h.run('runningGenerationStep(project)'), 'storyboard');
+  assert.match(h.run('stepTemplate(steps[1])'), /class="step [^"]*running/);
   assert.doesNotMatch(h.run('stepTemplate(steps[2])'), /class="step [^"]*running/);
   assert.match(h.run('outputContentTemplate()'), /阶段状态<\/span><b><i><\/i> 已完成/);
   assert.doesNotMatch(h.run('outputContentTemplate()'), /workflow-audit-progress|正在生成并下载视频镜头/);
@@ -1420,8 +1588,8 @@ async function flushAutoPipelineUntil(predicate) {
 test('自动主链从故事完成两素材两镜头并下载全部视频，批量覆盖只作用于当前项目', async () => {
   const { h, calls } = autoPipelineHarness();
   await h.run('startGeneration()');
-  assert.equal(calls.workflows.length, 1);
-  assert.equal(calls.workflows[0].options.autoRunToVideo, true);
+  assert.deepEqual(calls.workflows.map(call => call.options.stage), ['outline', 'storyboard', 'assets']);
+  for (const call of calls.workflows) assert.equal(call.options.autoRunToVideo, true);
   assert.equal(calls.images.length, 2);
   assert.equal(calls.creates.length, 2);
   assert.equal(calls.polls.length, 2);
@@ -1465,7 +1633,7 @@ test('一键全流程在生图或视频轮询时查看分镜，后续全部完�
       ? { files: [{ localPath: 'C:/mock-reference-0.png' }] }
       : { status: 'succeeded', videoUrl: 'https://offline.invalid/task-0.mp4' });
     await running;
-    assert.equal(calls.workflows.length, 1, stage);
+    assert.deepEqual(calls.workflows.map(call => call.options.stage), ['outline', 'storyboard', 'assets'], stage);
     assert.equal(calls.images.length, 2, stage);
     assert.equal(calls.creates.length, 2, stage);
     assert.equal(calls.polls.length, 2, stage);
@@ -1511,11 +1679,11 @@ test('自动主链在生图前检查原始三秒或三十秒时长，不能用�
   for (const duration of [3, 30]) {
     const { h, calls } = autoPipelineHarness({ data: autoPipelineFixture({ duration }) });
     await h.run('startGeneration()');
-    assert.equal(calls.workflows.length, 1);
+    assert.ok(calls.workflows.length >= 1);
     assert.equal(calls.images.length, 0);
     assert.equal(calls.creates.length, 0);
     assert.equal(h.run('project.autoPipeline.status'), 'failed');
-    assert.equal(h.run('project.outputs.storyboard.shots[0].duration'), duration);
+    assert.equal(h.run('project.outputs.storyboard?.shots[0]?.duration ?? project.outputs.analysis?.outline.rows[0]?.duration'), duration);
     assert.match(h.run('project.autoPipeline.error'), /原始时长.*4–15/);
   }
 });
@@ -1553,37 +1721,50 @@ test('自动主链分镜和实际图片使用同一次启动锁定的两个Skill
   h.context.window.storyforgeAI.generateWorkflow = async (script, options) => {
     calls.workflows.push({ script, options });
     h.run('project.generationSkills.assets.content = "生成期间修改的要求"');
-    return { data: structuredClone(data) };
+    return { stage: options.stage, data: stageFixtureData(structuredClone(data), options.stage) };
   };
   await h.run('startGeneration()');
-  assert.deepEqual(calls.workflows[0].options.stageSkills, skills);
+  assert.deepEqual(calls.workflows.map(call => call.options.stage), ['outline', 'storyboard', 'assets']);
+  for (const call of calls.workflows) assert.deepEqual(call.options.stageSkills, skills);
   assert.equal(calls.images.length, 2);
   for (const request of calls.images) assert.deepEqual(request.assetSkill, skills.assets);
 });
 
-test('自动主链停止或切换时丢弃各阶段迟到响应，轮询结果不会写入新项目', async () => {
-  for (const stage of ['storyboard', 'assets', 'poll', 'download']) {
+test('全流程仅显式停止会丢弃迟到响应，切换项目则继续保存原项目且不污染新项目', async () => {
+  for (const stage of ['outline', 'storyboard', 'asset-prompts', 'assets', 'poll', 'download']) {
     for (const operation of ['stop', 'switch']) {
       const { h, calls, data } = autoPipelineHarness();
       let resolvePending, entered;
       const reached = new Promise(resolve => { entered = resolve; });
       const pending = new Promise(resolve => { resolvePending = resolve; });
       const api = h.context.window.storyforgeAI;
-      if (stage === 'storyboard') api.generateWorkflow = async (script, options) => { calls.workflows.push({ script, options }); entered(); return pending; };
+      const textStage = stage === 'asset-prompts' ? 'assets' : stage;
+      const isTextStage = ['outline', 'storyboard', 'asset-prompts'].includes(stage);
+      if (isTextStage) api.generateWorkflow = async (script, options) => {
+        calls.workflows.push({ script, options });
+        if (options.stage === textStage) { entered(); return pending; }
+        return { stage: options.stage, data: stageFixtureData(structuredClone(data), options.stage) };
+      };
       if (stage === 'assets') api.generateCodexImage = async options => { calls.images.push(options); entered(); return pending; };
       if (stage === 'poll') api.getSeedanceTask = async id => { calls.polls.push(id); entered(); return pending; };
       if (stage === 'download') api.downloadSeedanceVideo = async options => { calls.downloads.push(options); entered(); return pending; };
       h.run('projectLibrary.projects.push(createProject({ id:"other-auto", script:"另一个项目" }))');
       const running = h.run('startGeneration()');
-      await reached;
+      await waitForMockRequest(reached, running);
       const before = { images: calls.images.length, creates: calls.creates.length, downloads: calls.downloads.length };
       h.run(operation === 'switch' ? 'switchProject("other-auto")' : 'stopCurrentGeneration()');
       const currentBeforeLateResponse = h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]');
-      resolvePending(stage === 'storyboard' ? { data } : stage === 'assets' ? { files: [{ localPath: 'C:/late-image.png' }] } : stage === 'poll' ? { status: 'succeeded', videoUrl: 'https://offline.invalid/late.mp4' } : { localPath: 'C:/late-video.mp4' });
+      resolvePending(isTextStage ? { stage: textStage, data: stageFixtureData(data, textStage) } : stage === 'assets' ? { files: [{ localPath: 'C:/late-image.png' }] } : stage === 'poll' ? { status: 'succeeded', videoUrl: 'https://offline.invalid/late.mp4' } : { localPath: 'C:/late-video.mp4' });
       await running;
-      assert.deepEqual({ images: calls.images.length, creates: calls.creates.length, downloads: calls.downloads.length }, before, `${stage}/${operation} launched a later stage`);
-      assert.deepEqual(h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]'), currentBeforeLateResponse, `${stage}/${operation} wrote a late response`);
-      assert.equal(h.run('projectLibrary.projects[0].autoPipeline.status'), 'stopped');
+      if (operation === 'stop') {
+        assert.deepEqual({ images: calls.images.length, creates: calls.creates.length, downloads: calls.downloads.length }, before, `${stage} launched after stop`);
+        assert.equal(h.run('projectLibrary.projects[0].autoPipeline.status'), 'stopped');
+      } else {
+        assert.equal(h.run('projectLibrary.projects[0].autoPipeline.status'), 'completed', stage);
+        assert.equal(h.run('projectLibrary.projects[0].videoGeneration.items.length'), 2, stage);
+        assert.equal(h.run('projectLibrary.activeProjectId'), 'other-auto');
+      }
+      assert.deepEqual(h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]'), currentBeforeLateResponse, `${stage}/${operation} changed selected project`);
       assert.equal(h.run('autoPipelineRun'), null);
     }
   }
@@ -1625,11 +1806,12 @@ test('自动主链完成真人认证后批量恢复全部剩余镜头，不重�
   assert.equal(calls.creates[0].imageInputs[0].assetId, 'asset-approved-reference');
 });
 
-test('真人认证恢复计时器执行前停止或切换项目，不会误启动视频', async () => {
+test('认证恢复等待期间显式停止会取消，切换查看项目仍恢复原项目视频', async () => {
   for (const operation of ['stop', 'switch', 'switch-back']) {
     const { h, calls, data } = autoPipelineHarness();
     prepareAutoPortraitResume(h, data);
     const originalId = h.run('project.id');
+    h.context.originalId = originalId;
     const callbacks = [];
     h.context.window.setTimeout = callback => { callbacks.push(callback); return callbacks.length; };
     h.run('savePortraitCertificationAndResume(); projectLibrary.projects.push(createProject({id:"after-certification",script:"新项目"}))');
@@ -1643,10 +1825,30 @@ test('真人认证恢复计时器执行前停止或切换项目，不会误启�
     }
     const beforeCallback = h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]');
     callbacks[0]();
-    await new Promise(resolve => setImmediate(resolve));
+    await flushAutoPipelineUntil(() => h.run('projectLibrary.projects.find(item => item.id === originalId).autoPipeline.status') !== 'running');
     assert.equal(h.run('project.id'), operation === 'switch' ? 'after-certification' : originalId);
-    assert.deepEqual(h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]'), beforeCallback, operation);
-    assert.equal(calls.workflows.length + calls.images.length + calls.creates.length + calls.polls.length + calls.downloads.length, 0, operation);
+    assert.equal(calls.workflows.length + calls.images.length, 0, operation);
+    if (operation === 'stop') {
+      assert.deepEqual(h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]'), beforeCallback, operation);
+      assert.equal(calls.creates.length + calls.polls.length + calls.downloads.length, 0);
+    } else {
+      if (operation === 'switch') assert.deepEqual(h.snapshot('[project.id, project.outputs, project.completed, project.videoGeneration]'), beforeCallback, operation);
+      assert.equal(calls.creates.length, 2, operation);
+      assert.equal(calls.downloads.length, 2, operation);
+      assert.equal(h.run('projectLibrary.projects.find(item => item.id === originalId).autoPipeline.status'), 'completed', operation);
+    }
     assert.equal(h.run('autoPipelineRun'), null, operation);
   }
+});
+
+
+test('全流程缺少文本模型配置时不占用后台任务，也不调用后续阶段', async () => {
+  let calls = 0;
+  const h = harness({ generateWorkflow: async () => { calls += 1; } });
+  h.run('project.script = "测试原文"; project.autoRunToVideo = true; deepseekStatus.configured = false; seedanceStatus.configured = true; setModelMessage = () => {};');
+  await h.run('startGeneration()');
+  assert.equal(calls, 0);
+  assert.equal(h.run('project.running'), false);
+  assert.equal(h.run('autoPipelineRun'), null);
+  assert.equal(h.run('activeBackgroundProject()'), null);
 });

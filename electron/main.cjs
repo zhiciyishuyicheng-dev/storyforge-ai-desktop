@@ -275,6 +275,10 @@ ipcMain.handle('deepseek:generate-workflow', async (event, rawScript, rawRun = {
   const run = rawRun && typeof rawRun === 'object' && !Array.isArray(rawRun) ? rawRun : {};
   for (const key of ['runId', 'projectId']) if (run[key] !== undefined && (typeof run[key] !== 'string' || run[key].length > 128)) throw new Error('生成任务标识无效，请重新开始。');
   if (run.autoRunToVideo !== undefined && typeof run.autoRunToVideo !== 'boolean') throw new Error('全流程自动生成开关无效，请重新设置。');
+  if (run.stage !== undefined && !['outline', 'storyboard', 'assets'].includes(run.stage)) throw new Error('生成步骤无效，请重新选择。');
+  for (const key of ['confirmedOutline', 'confirmedStoryboard']) {
+    if (run[key] !== undefined && (!run[key] || typeof run[key] !== 'object' || Array.isArray(run[key]))) throw new Error('已确认的上一步结果无效，请重新生成并确认。');
+  }
   const provider = run.provider === undefined ? 'deepseek' : run.provider;
   if (!['deepseek', 'codex-subscription'].includes(provider)) throw new Error('分镜生成方式无效，请重新选择。');
   if (run.model !== undefined && (typeof run.model !== 'string' || (run.model && !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,159}$/.test(run.model)))) throw new Error('分镜模型无效，请重新选择。');
@@ -323,7 +327,12 @@ ipcMain.handle('deepseek:generate-workflow', async (event, rawScript, rawRun = {
       },
       onProgress, provider, model, reasoningEffort,
     });
-    const result = await generateWorkflow(script, { ratio: readSeedanceSettings().ratio, stageSkills, ...(run.autoRunToVideo === true ? { videoReady: true } : {}) });
+    const result = await generateWorkflow(script, { ratio: readSeedanceSettings().ratio, stageSkills, ...(run.autoRunToVideo === true ? { videoReady: true } : {}),
+      ...(run.stage !== undefined ? { stage: run.stage,
+        ...(run.confirmedOutline !== undefined ? { confirmedOutline: structuredClone(run.confirmedOutline) } : {}),
+        ...(run.confirmedStoryboard !== undefined ? { confirmedStoryboard: structuredClone(run.confirmedStoryboard) } : {}),
+      } : {}),
+    });
     checkCancelled();
     return { ...result, progress: { ...result.progress, runId, projectId } };
   } finally {

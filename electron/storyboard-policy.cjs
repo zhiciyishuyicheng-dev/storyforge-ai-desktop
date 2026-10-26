@@ -128,7 +128,7 @@ function canPublishIgnoredCandidate(candidate, { context } = {}) {
   if (!isObject(candidate) || (!isObject(candidate.outline) && !isObject(candidate.analysis)) || !isObject(candidate.assets) || !isObject(candidate.storyboard)) return false;
   const { assets, storyboard: board } = candidate;
   if (![...ASSET_KINDS, 'characterChecklist', 'characterDifferenceMatrix'].every(key => Array.isArray(assets[key]) && assets[key].every(isObject))) return false;
-  if (ASSET_KINDS.some(key => assets[key].some(item => !clean(item.name) || !clean(item.fileName) || !clean(item.prompt)))) return false;
+  if (ASSET_KINDS.some(key => assets[key].some(item => !clean(item.name) || !clean(item.fileName) || (context?.stage !== 'storyboard' && !clean(item.prompt))))) return false;
   if (!Array.isArray(board.shots) || !board.shots.length || hasGenuineBlockers(candidate)) return false;
   const readable = board.shots.every(shot => isObject(shot) && ['string', 'number'].includes(typeof shot.no) && clean(String(shot.no)) && clean(shot.prompt)
     && typeof shot.duration === 'number' && Number.isFinite(shot.duration) && shot.duration > 0
@@ -142,7 +142,7 @@ function validateCandidate(candidate, { script, context } = {}) {
     const shots = candidate?.storyboard?.shots;
     const errors = !Array.isArray(shots) || !shots.length
       ? [error('NO_BLOCKS', '没有可交付生成块；缺材料时须明确报告阻塞。')]
-      : !canPublishIgnoredCandidate({ ...candidate, storyboard: { ...candidate.storyboard, blockers: [] } }) ? [error('CUSTOM_CANDIDATE_SHAPE', '用户 Skill 结果缺少可展示的完整分镜大纲、分镜或素材结构。')]
+      : !canPublishIgnoredCandidate({ ...candidate, storyboard: { ...candidate.storyboard, blockers: [] } }, { context: { stage: context?.stage } }) ? [error('CUSTOM_CANDIDATE_SHAPE', '用户 Skill 结果缺少可展示的完整分镜大纲、分镜或素材结构。')]
         : [...outlineErrors(candidate), ...customIdentityErrors(candidate)];
     errors.push(...videoDurationErrors(candidate, context));
     return { valid: errors.length === 0, errors, blockNos: Array.isArray(shots) ? shots.map(shot => blockNo(shot?.no)) : [], scope: '用户 Skill · 文本与计划' };
@@ -163,7 +163,7 @@ function validateCandidate(candidate, { script, context } = {}) {
   const assetNames = new Set();
   const fileNames = new Set();
   assetItems.forEach(asset => {
-    if (!isObject(asset) || !clean(asset.name) || asset.name !== asset.name.trim() || !clean(asset.fileName) || !clean(asset.prompt)) { add('ASSET_FIELDS', '每个实际参考图素材须有准确名称、独立文件名和完整生图提示词。', null, 'G1'); return; }
+    if (!isObject(asset) || !clean(asset.name) || asset.name !== asset.name.trim() || !clean(asset.fileName) || (context?.stage !== 'storyboard' && !clean(asset.prompt))) { add('ASSET_FIELDS', context?.stage === 'storyboard' ? '每个参考素材身份须有准确名称和独立文件名。' : '每个实际参考图素材须有准确名称、独立文件名和完整生图提示词。', null, 'G1'); return; }
     if (assetNames.has(asset.name)) add('ASSET_NAME_DUPLICATE', '所有参考素材的 name 必须全局唯一，避免引用绑定歧义。', null, 'G1');
     assetNames.add(asset.name);
     if (!/^[^<>:"/\\|?*\x00-\x1f]+\.(?:png|jpe?g|webp|bmp)$/iu.test(asset.fileName) || asset.fileName !== asset.fileName.trim()) add('ASSET_FILENAME', '参考素材文件名须为有效的独立图片文件名，不能包含目录或非法字符。', null, 'G1');
@@ -471,7 +471,7 @@ function buildIgnoredAuditSummary(candidate, audit, { repairCount = 1, context, 
   const shots = Array.isArray(board?.shots) ? board.shots : [];
   if (!Number.isInteger(repairCount) || repairCount < 1) throw new Error('至少完成一次实际回炉后才能忽略审计问题。');
   if (hasGenuineBlockers(candidate, audit)) throw new Error('存在真实剧情阻塞，不能将缺失材料当作审计问题忽略。');
-  if (!canPublishIgnoredCandidate(candidate)) throw new Error('没有完整可用的生成块和基础数据，不能忽略审计后继续。');
+  if (!canPublishIgnoredCandidate(candidate, { context })) throw new Error('没有完整可用的生成块和基础数据，不能忽略审计后继续。');
 
   const acceptedIssues = [];
   const append = value => {

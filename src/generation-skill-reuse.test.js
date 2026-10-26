@@ -200,8 +200,9 @@ test('复用的两个 Skill 原样进入下次分镜请求并锁定，运行中�
   const assetId = remember(h, 'assets', assetDoc);
   select(h, 'storyboard', storyId); h.run('applyGenerationSkillHistory();');
   select(h, 'assets', assetId); h.run('applyGenerationSkillHistory();');
-  h.run('project.script = "锁定原文"; project.activeStep = "storyboard"; project.outputs.storyboard = {body:"已确认的旧分镜"};');
+  h.run('project.script = "锁定原文"; project.activeStep = "storyboard"; project.outputs.storyboard = {body:"已确认的旧分镜"}; project.outputs.analysis = {outline:{rows:[{no:"01",duration:5,scene:"书房",content:"读信。"}],count:1,totalDuration:5,unknownDurationCount:0}};');
   const running = h.run('startGeneration()');
+  assert.equal(captured.stage, "storyboard");
   assert.deepEqual(captured.stageSkills, { storyboard: storyboardDoc, assets: assetDoc });
   assert.equal(h.run('project.outputs.storyboard.body'), '已确认的旧分镜');
   h.run('project.generationSkills.storyboard.content = "仅改变外部副本";');

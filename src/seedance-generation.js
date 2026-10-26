@@ -12,7 +12,7 @@ export function selectSeedanceGenerationIndexes(items, { indexes = null, force =
   const explicit = Array.isArray(indexes);
   const candidates = explicit
     ? indexes.filter((index, position) => Number.isInteger(index) && index >= 0 && index < list.length && indexes.indexOf(index) === position)
-    : list.map((_item, index) => index).filter((index) => force || list[index]?.status !== 'success');
+    : list.map((_item, index) => index).filter((index) => force || list[index]?.needsGeneration === true || list[index]?.status !== 'success');
   const normalizedMode = normalizeSeedanceGenerationMode(mode);
   return {
     candidates,

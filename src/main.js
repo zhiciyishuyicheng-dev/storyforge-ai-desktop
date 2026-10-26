@@ -97,6 +97,8 @@ let seedanceGenerationModeDraft = SEEDANCE_DEFAULT_GENERATION_MODE;
 let customAssetTargetShotIndex = null;
 let codexImageStatus = { available: false, authenticated: false, imageGeneration: false, model: OPENAI_IMAGE_MODEL, checking: true };
 let codexImageRun = null;
+let videoRun = null;
+let pendingVideoResume = null;
 let codexImageSettingsOpen = false;
 let workflowRun = null;
 let autoPipelineRun = null;
@@ -251,7 +253,7 @@ function normalizeProject(saved) {
       return item;
     }) : [],
   };
-  migrated.videoGeneration.generatedCount = migrated.videoGeneration.items.filter((item) => getSelectedVideoVersion(item)).length;
+  migrated.videoGeneration.generatedCount = migrated.videoGeneration.items.filter(videoItemIsComplete).length;
   if (migrated.videoGeneration.status === 'running') {
     migrated.videoGeneration.status = migrated.videoGeneration.items.length > 0
       && migrated.videoGeneration.generatedCount === migrated.videoGeneration.items.length ? 'complete' : 'pending';
@@ -324,12 +326,26 @@ function saveProjectLibrary() {
   localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(projectLibrary));
 }
 
-function saveProject() {
-  project.updatedAt = new Date().toISOString();
-  const index = projectLibrary.projects.findIndex((item) => item.id === project.id);
-  if (index >= 0) projectLibrary.projects[index] = project;
-  else projectLibrary.projects.push(project);
-  projectLibrary.activeProjectId = project.id;
+function isRegisteredProject(ownerProject) {
+  return Boolean(ownerProject && (ownerProject === project || projectLibrary.projects.some(item => item === ownerProject && item.id === ownerProject.id)));
+}
+
+function activeBackgroundProject() {
+  return workflowRun?.ownerProject || codexImageRun?.ownerProject || videoRun?.ownerProject || pendingVideoResume?.ownerProject || autoPipelineRun?.ownerProject || null;
+}
+
+function generateRunToken(ownerProject = project) {
+  if (backgroundGenerationBlocked(ownerProject)) return null;
+  return ++generationRun;
+}
+
+function saveProject(ownerProject = project) {
+  if (!isRegisteredProject(ownerProject)) return false;
+  ownerProject.updatedAt = new Date().toISOString();
+  const index = projectLibrary.projects.findIndex((item) => item.id === ownerProject.id);
+  if (index >= 0) projectLibrary.projects[index] = ownerProject;
+  else projectLibrary.projects.push(ownerProject);
+  if (ownerProject === project) projectLibrary.activeProjectId = ownerProject.id;
   projectLibrary.skillHistory = seedSkillHistory(projectLibrary.skillHistory, projectLibrary.projects);
   saveProjectLibrary();
 }
@@ -393,8 +409,8 @@ function seedanceModelLabel(modelId = currentVideoSettings().model, provider = a
   return SEEDANCE_MODELS.find((item) => item.id === modelId)?.label || 'Seedance 2.0';
 }
 
-function activeVideoProvider() { return project.videoGeneration?.provider === 'comfy' ? 'comfy' : 'seedance'; }
-function currentVideoSettings() { return activeVideoProvider() === 'comfy' ? comfyVideoStatus : seedanceStatus; }
+function activeVideoProvider(ownerProject = project) { return ownerProject.videoGeneration?.provider === 'comfy' ? 'comfy' : 'seedance'; }
+function currentVideoSettings(ownerProject = project) { return activeVideoProvider(ownerProject) === 'comfy' ? comfyVideoStatus : seedanceStatus; }
 function videoServiceLabel(provider = activeVideoProvider()) { return provider === 'comfy' ? 'MiniMax H3' : 'Seedance'; }
 function videoOutputTitle(provider = activeVideoProvider()) { return `${videoServiceLabel(provider)} 分镜视频`; }
 
@@ -405,7 +421,7 @@ function projectListTemplate() {
     .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')))
     .map((item) => {
       const selected = item.id === project.id;
-      return `<div class="project-row ${selected ? 'selected' : ''}"><button class="project-item ${selected ? 'selected' : ''}" data-project-id="${esc(item.id)}" title="切换到 ${esc(item.title)}"><span class="project-dot"></span><span class="project-name">${esc(item.title)}</span></button>${projectLibrary.projects.length > 1 ? `<button class="delete-project" data-delete-project-id="${esc(item.id)}" title="删除 ${esc(item.title)}" aria-label="删除 ${esc(item.title)}">×</button>` : ''}</div>`;
+      return `<div class="project-row ${selected ? 'selected' : ''}"><button class="project-item ${selected ? 'selected' : ''}" data-project-id="${esc(item.id)}" title="切换到 ${esc(item.title)}"><span class="project-dot"></span><span class="project-name">${esc(item.title)}</span>${item.running ? '<small class="project-running-badge">生成中</small>' : ''}</button>${projectLibrary.projects.length > 1 ? `<button class="delete-project" data-delete-project-id="${esc(item.id)}" title="删除 ${esc(item.title)}" aria-label="删除 ${esc(item.title)}">×</button>` : ''}</div>`;
     })
     .join('');
 }
@@ -827,7 +843,9 @@ function confirmClearCurrentResult() {
     renderWithoutMovingPage(); showToast(`清空未能保存，原结果已保留：${cleanRemoteError(error, '本地存储不可用')}`); return false;
   }
   // Ignore local uploads or other delayed callbacks started before the clear.
-  generationRun += 1;
+  const background = activeBackgroundProject();
+  if (!background || background === project) generationRun += 1;
+  project.asyncRevision = (project.asyncRevision || 0) + 1;
   renderWithoutMovingPage();
   document.querySelector('#clearOutput')?.focus();
   showToast(`已清空${steps.find(step => step.id === request.stepId).label}的结果，其他步骤和磁盘文件已保留。`);
@@ -844,10 +862,10 @@ function appTemplate() {
     : `${imageStatus.size} 生图`;
   const videoModelName = seedanceModelLabel();
   const generateLabel = project.running
-    ? (workflowRun?.ownerProject === project ? '生成 / 审计与自动修正中…' : runningGenerationStep() === 'assets' ? '正在生成参考图…' : '正在生成视频…')
+    ? (workflowRun?.ownerProject === project ? workflowRun.stage === 'storyboard' ? '分镜生成 / 审计与自动修正中…' : `正在生成${workflowStageLabel(workflowRun.stage)}…` : runningGenerationStep() === 'assets' ? '正在生成参考图…' : '正在生成视频…')
     : project.autoRunToVideo === true ? '一键生成到视频' : project.activeStep === 'video'
       ? (project.outputs.video ? '重新生成视频' : '开始生成视频')
-      : project.activeStep === 'assets' ? '生成缺少的参考图' : (project.completed.length ? '重新生成大纲与分镜' : '开始生成分镜');
+      : project.activeStep === 'assets' ? !project.outputs.assets || textStageDependencyError('video') ? '生成资产提示词' : '生成缺少的参考图' : project.activeStep === 'storyboard' ? project.outputs.storyboard ? '重新生成分镜脚本' : '生成分镜脚本' : project.outputs.analysis ? '重新生成分镜大纲' : '生成分镜大纲';
   return `
     <div class="shell">
       <aside class="sidebar">
@@ -867,7 +885,7 @@ function appTemplate() {
           <div class="script-input-wrap ${project.script ? 'has-content' : ''}"><textarea id="scriptInput" ${project.running ? 'disabled' : ''} placeholder="把小说改编后的剧本粘贴到这里...\n\n建议包含：集数、场景、人物和对白。${project.script ? '' : '\n\n还没有剧本？试试下方示例。'}">${esc(project.script)}</textarea><div class="textarea-footer"><span>${project.script.length ? `${project.script.length} 字` : '0 字'}</span><label class="upload-link" for="fileInput">↑ 导入文件</label><input type="file" id="fileInput" accept=".txt,.md" ${project.running ? 'disabled' : ''} hidden /></div></div>
           <div class="sidebar-input-actions"><button class="sample-link" id="useDemo" ${project.running ? 'disabled' : ''}>加载示例 <span>↗</span></button><button class="primary-button" id="startGenerate" ${project.running ? 'disabled' : ''}><span class="sparkle">✦</span> ${generateLabel} <span>→</span></button></div>
           <label class="auto-pipeline-switch"><input id="autoRunToVideo" type="checkbox" role="switch" ${project.autoRunToVideo === true ? 'checked' : ''} ${project.running ? 'disabled' : ''}><span><b>一键跑完全流程</b><small>从分镜大纲自动完成参考图，再批量生成全部视频</small></span></label>
-          <p class="auto-flow-note">先生成分镜大纲和分镜脚本，第三步用 GPT 订阅生图或上传参考图，第四步由 ${esc(videoServiceLabel())} 生成视频</p>
+          <p class="auto-flow-note">普通模式每一步完成后等待确认；打开“一键跑完全流程”后才会自动连续执行。第四步由 ${esc(videoServiceLabel())} 生成视频。</p>
         </section>
         <div class="sidebar-bottom">
           <button class="account" id="openSettings"><div class="avatar">${project.storyboardGeneration?.provider === 'codex-subscription' ? 'G' : '深'}</div><div><b>${esc(storyboardProviderLabel())}</b><small>${esc(storyboardConnectionText())}</small></div><span class="settings">⚙</span></button>
@@ -905,8 +923,8 @@ function stepTemplate(step) {
 function runningGenerationStep(ownerProject = project) {
   if (!ownerProject.running) return null;
   if (codexImageRun?.ownerProject === ownerProject) return 'assets';
-  if (workflowRun?.ownerProject === ownerProject) return 'analysis';
-  if (autoPipelineRun?.ownerProject === ownerProject) return ({ checking: 'analysis', storyboard: 'analysis', assets: 'assets', video: 'video' })[ownerProject.autoPipeline?.phase] || null;
+  if (workflowRun?.ownerProject === ownerProject) return workflowStepForStage(workflowRun.stage);
+  if (autoPipelineRun?.ownerProject === ownerProject) return ({ checking: 'analysis', outline: 'analysis', storyboard: 'storyboard', 'asset-prompts': 'assets', assets: 'assets', video: 'video' })[ownerProject.autoPipeline?.phase] || null;
   if (ownerProject.videoGeneration?.status === 'running') return 'video';
   return null;
 }
@@ -927,7 +945,7 @@ function focusGenerationStep(stepId, run) {
 function runningTaskNoticeTemplate() {
   const stage = runningGenerationStep();
   if (!stage || autoPipelineRun?.ownerProject === project) return '';
-  const label = stage === 'assets' ? '参考图生成' : stage === 'video' ? '视频生成' : '分镜大纲与分镜脚本生成';
+  const label = workflowRun?.ownerProject === project ? `${workflowStageLabel(workflowRun.stage)}生成` : stage === 'assets' ? '参考图生成' : stage === 'video' ? '视频生成' : '分镜大纲生成';
   return `<section class="running-task-notice" role="status"><div><b>${label}正在后台进行</b><span>可以查看、复制其他步骤的结果；生成任务会继续。</span></div><div>${project.activeStep !== stage ? '<button class="outline-button" id="returnToRunningStage">返回生成页面</button>' : ''}<button class="outline-button" id="stopRunningTask">停止当前任务</button></div></section>`;
 }
 
@@ -954,7 +972,7 @@ function assetGenerationTemplate(output) {
     return `<article class="generated-asset-card local-upload-card"><div>${previews}</div><div class="generated-asset-copy"><div><span>${esc(String(prompt.type || '参考图'))}${prompt.customAsset ? ' · 自定义' : ''}</span><h4>${esc(String(prompt.name || `参考图${index + 1}`))}</h4><code>${esc(String(prompt.fileName || ''))}</code></div><b class="asset-result-status ${result.status === 'generating' ? 'generating' : result.error ? 'failed' : files.length ? 'success' : 'pending'}">${esc(statusLabel)}</b><p class="local-upload-help">每次 GPT 生图追加一张，保留已有参考图；同一项最多 9 张。${String(prompt.prompt || '').trim() ? '' : '此自定义项没有生图提示词，请上传图片。'}</p>${result.error ? `<p class="codex-image-item-error">${esc(cleanRemoteError(result.error, 'GPT 生图失败'))}</p>` : ''}<div class="local-upload-actions"><button class="primary-button generate-codex-asset" data-generate-codex-asset-index="${index}" ${project.running || files.length >= 9 || !String(prompt.prompt || '').trim() ? 'disabled' : ''}>${result.status === 'generating' ? 'GPT 正在生图…' : result.error ? '重试 GPT 订阅生图' : 'GPT 订阅生图'}</button><button class="outline-button upload-local-asset" data-upload-local-asset-index="${index}" ${project.running || files.length >= 9 ? 'disabled' : ''}>${files.length ? '追加参考图' : '上传参考图'}</button>${files.length ? `<button class="outline-button clear-local-asset" data-clear-local-asset-index="${index}" ${project.running ? 'disabled' : ''}>清空本项</button>` : ''}${prompt.customAsset ? `<button class="outline-button remove-custom-asset" data-remove-custom-asset-index="${index}" ${project.running ? 'disabled' : ''}>删除此项</button>` : ''}</div></div></article>`;
   }).join('');
   const customCard = `<button class="generated-asset-card add-custom-asset-card" id="addCustomAsset" ${project.running ? 'disabled' : ''}><span>＋</span><b>添加遗漏资源</b><small>自定义人物、场景、群像或道具，并上传对应参考图</small></button>`;
-  return `<section class="seedream-generator local-assets-uploader codex-assets-generator"><div class="seedream-generator-head"><div><span class="section-kicker">GPT SUBSCRIPTION & LOCAL IMAGES</span><h4>第三步 · 生成或上传参考图</h4><p>GPT Image 2 通过本机 Codex 的 ChatGPT 登录使用订阅限额，无需 API Key；也可上传本地图片。</p></div><div class="seedream-actions"><button class="outline-button" id="configureCodexImages">GPT 订阅设置 / 检查连接</button>${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开素材文件夹</button>' : ''}${activeRun ? '<button class="outline-button stop-codex-images" id="stopCodexImages">停止生图</button>' : `<button class="primary-button" id="generateMissingCodexAssets" ${project.running || !generatableMissing ? 'disabled' : ''}>生成缺少的参考图${generatableMissing ? `（${generatableMissing} 项）` : ''}</button>`}<button class="outline-button" id="confirmLocalAssets" ${project.running || !prompts.length || missing ? 'disabled' : ''}>进入第四步生成视频</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>批量只生成缺图的素材项。图片按素材准确名称保存，全部齐备后自动标记第三步完成，可直接进入视频步骤。</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, 'GPT 生图失败'))}</p>` : ''}</div><div class="generated-assets-grid">${cards}${customCard}</div></section>`;
+  return `<section class="seedream-generator local-assets-uploader codex-assets-generator"><div class="seedream-generator-head"><div><span class="section-kicker">GPT SUBSCRIPTION & LOCAL IMAGES</span><h4>第三步 · 生成或上传参考图</h4><p>GPT Image 2 通过本机 Codex 的 ChatGPT 登录使用订阅限额，无需 API Key；也可上传本地图片。</p></div><div class="seedream-actions"><button class="outline-button" id="configureCodexImages">GPT 订阅设置 / 检查连接</button>${state.outputDirectory ? '<button class="outline-button" id="openAssetFolder">打开素材文件夹</button>' : ''}${activeRun ? '<button class="outline-button stop-codex-images" id="stopCodexImages">停止生图</button>' : `<button class="primary-button" id="generateMissingCodexAssets" ${project.running || !generatableMissing ? 'disabled' : ''}>确认提示词，生成缺少的参考图${generatableMissing ? `（${generatableMissing} 项）` : ''}</button>`}<button class="outline-button" id="confirmLocalAssets" ${project.running || !prompts.length || missing ? 'disabled' : ''}>进入第四步生成视频</button></div></div><div class="seedream-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>批量只生成缺图的素材项。图片按素材准确名称保存，全部齐备后自动标记第三步完成，可直接进入视频步骤。</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, 'GPT 生图失败'))}</p>` : ''}</div><div class="generated-assets-grid">${cards}${customCard}</div></section>`;
 }
 
 function effectiveVideoPrompt(index, originalPrompt, state = project.videoGeneration) {
@@ -1011,7 +1029,7 @@ function videoVersionControlsTemplate(index, item, { allowGenerate = true, needs
   const selected = getSelectedVideoVersion(normalized);
   const versions = normalized.versions;
   const buttons = versions.map(version => `<button type="button" class="video-version-button${version.id === selected?.id ? ' selected' : ''}" data-select-video-version-index="${index}" data-video-version-id="${esc(version.id)}" aria-pressed="${version.id === selected?.id ? 'true' : 'false'}" title="切换到第 ${version.number} 版${version.generatedAt ? ` · ${esc(String(version.generatedAt))}` : ''}">第 ${version.number} 版</button>`).join('');
-  return `<div class="video-clip-toolbar"><div class="video-version-heading"><b>镜头 ${String(index + 1).padStart(2, '0')}</b><span>共 ${versions.length} 版</span>${selected ? `<small>当前：第 ${selected.number} 版${selected.duration ? ` · ${esc(String(selected.duration))} 秒` : ''}</small>` : '<small>尚未生成视频</small>'}</div><div class="video-clip-actions"><button class="outline-button generate-one-video" data-generate-video-index="${index}" ${project.running || !allowGenerate ? 'disabled' : ''} ${!allowGenerate ? 'title="请先准备分镜后再生成"' : ''}>${selected ? '重新生成此镜头' : item.status === 'failed' ? '重试此镜头' : '生成此镜头'}</button>${needsCertification ? `<button class="outline-button" data-open-portrait-certification="${index}" ${project.running ? 'disabled' : ''}>完成认证并继续</button>` : ''}</div>${buttons ? `<div class="video-version-switch" role="group" aria-label="镜头 ${index + 1} 的历史版本">${buttons}</div>` : ''}</div>`;
+  return `<div class="video-clip-toolbar"><div class="video-version-heading"><b>镜头 ${String(index + 1).padStart(2, '0')}</b><span>共 ${versions.length} 版</span>${selected ? `<small>${normalized.needsGeneration ? '历史成片：' : '当前：'}第 ${selected.number} 版${selected.duration ? ` · ${esc(String(selected.duration))} 秒` : ''}</small>` : '<small>尚未生成视频</small>'}</div><div class="video-clip-actions"><button class="outline-button generate-one-video" data-generate-video-index="${index}" ${project.running || !allowGenerate ? 'disabled' : ''} ${!allowGenerate ? 'title="请先准备分镜后再生成"' : ''}>${selected ? '重新生成此镜头' : item.status === 'failed' ? '重试此镜头' : '生成此镜头'}</button>${needsCertification ? `<button class="outline-button" data-open-portrait-certification="${index}" ${project.running ? 'disabled' : ''}>完成认证并继续</button>` : ''}</div>${buttons ? `<div class="video-version-switch" role="group" aria-label="镜头 ${index + 1} 的历史版本">${buttons}</div>` : ''}</div>`;
 }
 
 function videoPreviewTemplate(index, item, label = '待生成') {
@@ -1037,7 +1055,7 @@ function videoGenerationTemplate() {
   const generationMode = effectiveVideoGenerationMode(state);
   const confirmMode = generationMode === 'confirm';
   const durationText = videoDurationSummary(prompts, items, state.duration || seedanceStatus.duration);
-  const completed = items.filter((item) => getSelectedVideoVersion(item)).length;
+  const completed = items.filter(videoItemIsComplete).length;
   const failed = items.filter((item) => item.status === 'failed').length;
   const active = items.filter((item) => ['creating', 'queued', 'running', 'downloading'].includes(item.status)).length;
   const certificationPending = Boolean(state.pendingCertification);
@@ -1087,9 +1105,9 @@ function videoGenerationTemplate() {
   return `<section class="seedance-generator"><div class="seedance-generator-head"><div><span class="section-kicker">AI VIDEO GENERATION</span><h4>第四步 · ${esc(videoOutputTitle())}</h4><p>${esc(seedanceModelLabel())} · ${esc(currentVideoSettings().ratio)} · ${esc(currentVideoSettings().resolution)} · 支持逐镜与批量 · 按分镜 ${esc(durationText)}${state.generateAudio === false ? ' · 无声' : ' · 同步音频'}</p></div><div class="seedance-actions"><button class="outline-button" id="configureSeedance">视频设置</button>${state.outputDirectory ? '<button class="outline-button" id="openVideoFolder">打开视频文件夹</button>' : ''}<button class="outline-button" id="generateNextVideo" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(nextButtonText)}</button><button class="primary-button" id="generateAllVideos" ${project.running || !prompts.length || allComplete ? 'disabled' : ''}>${esc(batchButtonText)}</button></div></div><div class="seedance-video-progress"><div><b>${esc(statusText)}</b><span>${progress}%</span></div><i><em style="width:${progress}%"></em></i><small>${esc(progressHelp)}</small>${state.lastError ? `<p class="seedream-global-error">${esc(cleanRemoteError(state.lastError, '生成失败'))}</p>` : ''}</div><div class="video-clips-grid">${cards}</div></section>`;
 }
 
-function storyboardShotDuration(index, prompt, fallback = seedanceStatus.duration) {
-  const explicitDuration = project.outputs.storyboard?.durations?.[index];
-  const resolve = storyboardUsesSkill21() ? resolveStoryboardDuration : resolveSeedanceDuration;
+function storyboardShotDuration(index, prompt, fallback = seedanceStatus.duration, ownerProject = project) {
+  const explicitDuration = ownerProject.outputs.storyboard?.durations?.[index];
+  const resolve = storyboardUsesSkill21(ownerProject.outputs.storyboard) ? resolveStoryboardDuration : resolveSeedanceDuration;
   return resolve(explicitDuration, prompt, fallback);
 }
 
@@ -1101,9 +1119,9 @@ function storyboardUsesCustomSkill(storyboard = project.outputs.storyboard) {
   return storyboard?.auditSummary?.auditBasis === '用户 Skill';
 }
 
-function videoItemDuration(index, prompt, item, fallback = seedanceStatus.duration) {
-  const duration = storyboardShotDuration(index, prompt, fallback);
-  return storyboardUsesSkill21() ? duration : normalizeSeedanceDuration(item?.duration, duration);
+function videoItemDuration(index, prompt, item, fallback = seedanceStatus.duration, ownerProject = project) {
+  const duration = storyboardShotDuration(index, prompt, fallback, ownerProject);
+  return storyboardUsesSkill21(ownerProject.outputs.storyboard) ? duration : normalizeSeedanceDuration(item?.duration, duration);
 }
 
 function effectiveVideoGenerationMode(state = project.videoGeneration || defaultProject.videoGeneration) {
@@ -1121,20 +1139,28 @@ function videoDurationSummary(prompts, items = [], fallback = seedanceStatus.dur
 }
 
 function outputTemplate() {
-  const errorNotice = project.workflowError ? `<div class="workflow-audit-error" role="alert"><b>本次分镜未交付</b><p>${esc(String(project.workflowError))}</p><small>上次已确认的成果仍然保留。</small></div>` : '';
+  const errorNotice = project.workflowError ? `<div class="workflow-audit-error" role="alert"><b>本次生成未交付</b><p>${esc(String(project.workflowError))}</p><small>上次已确认的成果仍然保留。</small></div>` : '';
   const ignoredNotice = project.activeStep !== 'storyboard' && project.outputs.storyboard?.auditSummary?.finalStatus === '审计未通过（已忽略）' ? storyboardIgnoredNotice() : '';
-  return `${autoPipelineNoticeTemplate()}${runningTaskNoticeTemplate()}${errorNotice}${ignoredNotice}${outputContentTemplate()}`;
+  return `${backgroundProjectNoticeTemplate()}${autoPipelineNoticeTemplate()}${runningTaskNoticeTemplate()}${errorNotice}${ignoredNotice}${outputContentTemplate()}`;
+}
+
+function backgroundProjectNoticeTemplate() {
+  const owner = activeBackgroundProject();
+  if (!owner || owner === project) return '';
+  const stage = steps.find(step => step.id === runningGenerationStep(owner));
+  return `<section class="running-task-notice"><div><b>项目“${esc(owner.title)}”正在后台${stage ? `生成${stage.label}` : '运行'}</b><span>切换项目只改变查看内容，任务和结果仍属于原项目。</span></div><button class="outline-button" id="returnToBackgroundProject" data-project-id="${esc(owner.id)}">返回运行项目</button></section>`;
 }
 
 function autoPipelineNoticeTemplate() {
   const state = project.autoPipeline;
   if (!state) return '';
-  const phases = { checking: '检查生成配置', storyboard: '分镜大纲与分镜脚本', assets: '生成参考图', video: '批量生成视频' };
+  const phases = { checking: '检查生成配置', outline: '生成分镜大纲', storyboard: '生成分镜脚本', 'asset-prompts': '生成资产提示词', assets: '生成参考图', video: '批量生成视频' };
   const labels = { running: '全流程进行中', completed: '全流程已完成', failed: '全流程已暂停', stopped: '全流程已停止' };
   return `<section class="auto-pipeline-notice ${state.status}" role="status"><div><b>${labels[state.status] || '全流程状态'} · ${phases[state.phase] || ''}</b><span>${esc(state.error || (state.status === 'completed' ? '全部视频镜头已生成并保存。' : '自动衔接下一阶段，视频按批量连续生成；可自由查看其他步骤。'))}</span></div>${state.status === 'running' ? `<div class="running-task-actions">${runningGenerationStep() !== project.activeStep ? '<button class="outline-button" id="returnToRunningStage">返回生成页面</button>' : ''}<button class="outline-button" id="stopAutoPipeline">停止全流程</button></div>` : ''}</section>`;
 }
 
 function currentStoryboardOutline(owner = project) {
+  if (owner.outputs?.analysis?.generatedStage === 'outline' && Array.isArray(owner.outputs.analysis.outline?.rows)) return owner.outputs.analysis.outline;
   const storyboard = owner.outputs?.storyboard;
   if (Array.isArray(storyboard?.shots)) return buildStoryboardOutline(storyboard, owner.outputs?.assets);
   if (Array.isArray(storyboard?.prompts) && storyboard.prompts.length) {
@@ -1158,11 +1184,16 @@ function outputContentTemplate() {
     ? { title: videoOutputTitle(), subtitle: steps.filter(step => step.id !== 'video').every(step => project.completed.includes(step.id)) ? '本地参考图和分镜已经准备完成' : '逐镜生成、查看和切换视频版本', time: '按镜头生成', body: '' } : null);
   if (project.activeStep === 'assets' && output) alignAssetGenerationItems(output.promptItems || []);
   const runningStep = runningGenerationStep();
-  const workflowPending = project.running && workflowRun?.ownerProject === project && ['analysis', 'storyboard'].includes(project.activeStep);
+  const workflowPending = project.running && workflowRun?.ownerProject === project && workflowStepForStage(workflowRun.stage) === project.activeStep;
+  const auditing = workflowPending && workflowRun.stage === 'storyboard';
   const viewingRunningStage = runningStep === project.activeStep || workflowPending;
-  if (viewingRunningStage && !output) return `<div class="generating"><div class="generating-orb">✦</div><h3>${workflowPending ? '生成 / 审计与自动修正中…' : `正在生成${steps[currentIndex()].label}…`}</h3><p>${workflowPending ? '审计未通过时最多自动回炉一次；回炉后仍未通过将保留警告并继续下一步。' : runningStep === 'assets' ? '正在生成并保存参考图' : '正在生成并下载视频镜头'}</p><div class="generating-track"><i></i></div><small>请保持程序开启</small></div>`;
+  if (viewingRunningStage && !output) return `<div class="generating"><div class="generating-orb">✦</div><h3>${auditing ? '分镜生成 / 审计与自动修正中…' : `正在生成${workflowPending ? workflowStageLabel(workflowRun.stage) : steps[currentIndex()].label}…`}</h3><p>${workflowPending ? auditing ? '本次只生成当前步骤。审计未通过时最多修正一次。完成后等待你确认，再继续下一步。' : '本次只生成当前步骤。完成后等待你确认，再继续下一步。' : runningStep === 'assets' ? '正在生成并保存参考图，完成后等待确认。' : '正在生成并下载视频镜头'}</p><div class="generating-track"><i></i></div><small>可以切换查看其他项目，任务会继续。</small></div>`;
   if (project.activeStep === 'video' && !output && steps.filter((step) => step.id !== 'video').every((step) => project.completed.includes(step.id))) return `<div class="video-ready"><div class="video-ready-icon">▶</div><span class="section-kicker">READY FOR ${activeVideoProvider() === 'comfy' ? 'MINIMAX H3' : 'SEEDANCE'}</span><h3>本地参考图和分镜已经准备完成</h3><p>${esc(videoServiceLabel())} 支持单独生成一个镜头或批量生成全部镜头，并将完成的视频保存到本机。</p><div class="video-ready-actions"><button class="outline-button" id="configureSeedance">视频设置</button><button class="next-button" id="generateVideo" ${project.running ? 'disabled' : ''}>进入视频生成 <span>→</span></button></div></div>`;
   if (!output && project.running) return '<div class="empty-output"><div class="empty-icon">✧</div><h3>此步骤暂时没有生成结果</h3><p>后台任务仍在进行，可以查看其他步骤或返回生成页面。</p></div>';
+  if (!output && project.script.trim() && project.activeStep !== 'video') {
+    const stage = project.activeStep === 'analysis' ? 'outline' : project.activeStep;
+    return `<div class="empty-output"><div class="empty-icon">✧</div><h3>准备生成${workflowStageLabel(stage)}</h3><p>${esc(textStageDependencyError(stage) || '本次只执行当前步骤，完成后等待你确认。')}</p><button class="outline-button" id="generateEmptyCurrentStage" ${project.running ? 'disabled' : ''}>生成${workflowStageLabel(stage)} <span>→</span></button></div>`;
+  }
   if (!output) return `<div class="empty-output"><div class="empty-icon">✧</div><h3>准备好开始创作了吗？</h3><p>输入一段剧本，点击“开始生成”，你的短剧工作流会从这里展开。</p><button class="outline-button" id="emptyStart">使用示例开始 <span>→</span></button></div>`;
   const isAssets = project.activeStep === 'assets';
   const isVideo = project.activeStep === 'video';
@@ -1175,10 +1206,12 @@ function outputContentTemplate() {
   const stageStatus = workflowPending ? '生成 / 审计与自动修正中' : viewingRunningStage ? '生成中' : partial && project.activeStep === 'storyboard' ? '部分通过 · 存在阻塞' : auditIgnored && project.activeStep === 'storyboard' ? '已继续 · 审计未通过' : stageComplete ? '已完成' : '待生成';
   const videoDurationText = isVideo ? videoDurationSummary(project.outputs.storyboard?.prompts || [], project.videoGeneration?.items || [], project.videoGeneration?.duration) : '';
   const videoGenerationModeText = effectiveVideoGenerationMode() === 'confirm' ? '逐镜确认' : '批量连续';
-  const pendingNotice = workflowPending ? '<div class="workflow-audit-progress" role="status"><b>生成 / 审计与自动修正中…</b><span>下方保留上次成果，新结果完成审计与最多一次修正后一次替换。</span></div>' : '';
+  const pendingNotice = workflowPending ? `<div class="workflow-audit-progress" role="status"><b>${auditing ? '分镜生成 / 审计与自动修正中…' : `正在生成${workflowStageLabel(workflowRun.stage)}…`}</b><span>下方保留上次成果。本步骤完成后替换结果，普通模式等待确认。</span></div>` : '';
   const partialNotice = partial && project.activeStep !== 'storyboard' ? '<div class="storyboard-partial-notice">本项目分镜仅部分通过，受阻内容尚未交付。请在第二步查看具体范围与缺少的信息；当前可用素材和视频仅对应已通过的独立生成块。</div>' : '';
-  const body = `${pendingNotice}${partialNotice}${isAssets ? assetGenerationTemplate(output) : ''}${isVideo ? videoGenerationTemplate() : ''}${outlineOutput.body || ''}`;
-  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''} ${isVideo ? 'video-generation-layout' : ''}${auditIgnored && project.activeStep === 'storyboard' ? ' audit-ignored-result' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(resultTitle)}</h3><p>${esc(outlineOutput.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>${isVideo ? '镜头时长' : isOutline ? '大纲规模' : '预计耗时'}</span><b>${isVideo ? esc(videoDurationText) : isOutline ? esc(storyboardOutlineSummary(outlineOutput.outline)) : output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? `<div class="side-stat vertical"><span>分镜规范</span><b>${storyboardUsesCustomSkill() ? '用户 Skill' : storyboardUsesSkill21() ? 'Skill v2.1' : '即梦二点零'}</b><small>${storyboardUsesCustomSkill() ? esc(String(project.outputs.storyboard.auditSummary.skillName || '上传规范')) + '<br>按本次上传规范执行' : storyboardUsesSkill21() ? '每块≤15秒、最多5镜<br>审计结果与正文分开' : '按剧情动态分配<br>素材引用已分配'}</small></div>` : ''}${isAssets ? '<div class="side-stat vertical"><span>素材方式</span><b>GPT 订阅 / 本地上传</b><small>GPT Image 2 · 本机 Codex<br>图片齐全后可进入视频步骤</small></div>' : ''}${isVideo ? `<div class="side-stat vertical"><span>视频模型</span><b>${esc(seedanceModelLabel())}</b><small>${esc(currentVideoSettings().ratio)} · ${esc(currentVideoSettings().resolution)}<br>逐镜或批量 · 保存 MP4</small></div>` : ''}<button class="outline-button full" id="rerunStep" ${project.running ? 'disabled' : ''}>${isAssets ? '重新生成参考图' : isVideo ? '重新生成全部视频' : '重新生成大纲与分镜'} <span>↻</span></button>${isVideo ? '<div class="auto-note">成功镜头已保存到本机，可逐个生成或批量继续。</div>' : stageComplete ? `<div class="auto-note"><i>${auditIgnored && project.activeStep === 'storyboard' ? '!' : '✓'}</i> ${isAssets ? '参考图已全部完成' : project.activeStep === 'storyboard' && storyboardUsesSkill21() ? auditIgnored ? '审计未通过，已忽略并继续' : storyboardUsesCustomSkill() ? '按用户 Skill 完成文本审计' : '分镜文本审计通过' : '当前阶段已完成'}</div>` : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
+  const dependencyError = textStageDependencyError(isOutline ? 'outline' : project.activeStep);
+  const staleNotice = dependencyError ? `<div class="storyboard-partial-notice">${esc(dependencyError)}已有成果和媒体仍保留。</div>` : '';
+  const body = `${pendingNotice}${partialNotice}${staleNotice}${isAssets ? assetGenerationTemplate(output) : ''}${isVideo ? videoGenerationTemplate() : ''}${outlineOutput.body || ''}${manualStageConfirmationTemplate()}`;
+  return `<div class="result-layout ${project.activeStep === 'storyboard' ? 'seedance-layout' : ''} ${isAssets ? 'assets-layout' : ''} ${isVideo ? 'video-generation-layout' : ''}${auditIgnored && project.activeStep === 'storyboard' ? ' audit-ignored-result' : ''}"><div class="result-main"><div class="result-title"><span class="result-badge">${steps.find((s) => s.id === project.activeStep).no}</span><div><h3>${esc(resultTitle)}</h3><p>${esc(outlineOutput.subtitle)}</p></div><span class="result-time">刚刚生成</span></div><div class="result-body">${body}</div></div><div class="result-side"><div class="side-stat"><span>阶段状态</span><b><i></i> ${stageStatus}</b></div><div class="side-stat"><span>${isVideo ? '镜头时长' : isOutline ? '大纲规模' : '预计耗时'}</span><b>${isVideo ? esc(videoDurationText) : isOutline ? esc(storyboardOutlineSummary(outlineOutput.outline)) : output.time || '12 秒'}</b></div>${project.activeStep === 'storyboard' ? `<div class="side-stat vertical"><span>分镜规范</span><b>${storyboardUsesCustomSkill() ? '用户 Skill' : storyboardUsesSkill21() ? 'Skill v2.1' : '即梦二点零'}</b><small>${storyboardUsesCustomSkill() ? esc(String(project.outputs.storyboard.auditSummary.skillName || '上传规范')) + '<br>按本次上传规范执行' : storyboardUsesSkill21() ? '每块≤15秒、最多5镜<br>审计结果与正文分开' : '按剧情动态分配<br>素材引用已分配'}</small></div>` : ''}${isAssets ? '<div class="side-stat vertical"><span>素材方式</span><b>GPT 订阅 / 本地上传</b><small>GPT Image 2 · 本机 Codex<br>图片齐全后可进入视频步骤</small></div>' : ''}${isVideo ? `<div class="side-stat vertical"><span>视频模型</span><b>${esc(seedanceModelLabel())}</b><small>${esc(currentVideoSettings().ratio)} · ${esc(currentVideoSettings().resolution)}<br>逐镜或批量 · 保存 MP4</small></div>` : ''}<button class="outline-button full" id="rerunStep" ${project.running ? 'disabled' : ''}>${isAssets ? '重新生成参考图' : isVideo ? '重新生成全部视频' : isOutline ? '重新生成分镜大纲' : '重新生成分镜脚本'} <span>↻</span></button>${isVideo ? '<div class="auto-note">成功镜头已保存到本机，可逐个生成或批量继续。</div>' : stageComplete ? `<div class="auto-note"><i>${auditIgnored && project.activeStep === 'storyboard' ? '!' : '✓'}</i> ${isAssets ? '参考图已全部完成' : project.activeStep === 'storyboard' && storyboardUsesSkill21() ? auditIgnored ? '审计未通过，已忽略并继续' : storyboardUsesCustomSkill() ? '按用户 Skill 完成文本审计' : '分镜文本审计通过' : '当前阶段已完成'}</div>` : '<div class="auto-note">当前阶段尚未完成</div>'}</div></div>`;
 }
 
 function makeOutput(id) {
@@ -1371,11 +1404,14 @@ function workflowProgressTemplate() {
   const current = progress?.current;
   const identity = progress?.prompt?.provider ? progress.prompt : workflowRun?.ownerProject === project ? resolveStoryboardGeneration(workflowRun.generation) : resolveStoryboardGeneration(project.storyboardGeneration);
   const thinkingLabel = `${identity.provider === 'codex-subscription' ? `GPT 订阅 · ${identity.model || '待选择模型'} · ` : ''}${identity.reasoningEffort === 'none' ? '思考已关闭 · none' : `${progress ? '已启用' : '启用思考'} · ${identity.reasoningEffort || '待选择'}`}`;
+  const textStage = workflowRun?.ownerProject === project ? workflowRun.stage : project.workflowProgressStage;
+  const plainStage = textStage === 'outline' || textStage === 'assets';
+  const stageName = workflowStageLabel(textStage);
   const customAudit = workflowRun?.ownerProject === project ? Boolean(workflowRun.stageSkills?.storyboard) : storyboardUsesCustomSkill();
-  const auditIgnored = progress?.status === 'completed' && (progress.auditIgnored || project.outputs.storyboard?.auditSummary?.finalStatus === '审计未通过（已忽略）');
+  const auditIgnored = !plainStage && progress?.status === 'completed' && (progress.auditIgnored || project.outputs.storyboard?.auditSummary?.finalStatus === '审计未通过（已忽略）');
   const statusLabels = { running: '正在执行', completed: '已完成', failed: '执行失败', stopped: '已停止' };
-  const phaseLabels = { preparing: '准备提示词', candidate: '生成大纲和分镜脚本', audit: '独立审计 60 项规则', repair: '修正分镜并准备重新审计', validating: '校验分镜数据', completed: '分镜流程已完成', failed: '分镜流程未完成', stopped: '本次分镜生成已停止' };
-  const requestLabels = { candidate: '大纲 / 分镜生成', repair: '自动修正', audit: '独立审计' };
+  const phaseLabels = { preparing: '准备提示词', candidate: textStage ? `生成${stageName}` : '生成大纲和分镜脚本', audit: '独立审计 60 项规则', repair: '修正分镜并准备重新审计', validating: '校验分镜数据', completed: textStage ? `${stageName}已完成${project.workflowProgressAutomatic ? '' : '，等待确认'}` : '分镜流程已完成', failed: textStage ? `${stageName}生成未完成` : '分镜流程未完成', stopped: '本次生成已停止' };
+  const requestLabels = { candidate: textStage ? `${stageName}生成` : '大纲 / 分镜生成', repair: '自动修正', audit: '独立审计' };
   const receiveLabels = { waiting: '等待首段响应', thinking: '接收模型思考', generating: '接收生成内容', completed: '响应已完成', failed: '请求失败', stopped: '已停止接收' };
   const previousPhaseLabels = { waiting: '等待首段', thinking: '模型思考', generating: '接收正文' };
   const previousPhase = ['failed', 'stopped'].includes(current?.status) && previousPhaseLabels[current.lastPhase]
@@ -1392,9 +1428,9 @@ function workflowProgressTemplate() {
     <div class="workflow-progress-current${auditIgnored ? ' warning' : ''}" role="status"><b>${auditIgnored ? '分镜流程已完成 · 审计失败已忽略' : customAudit && progress?.phase === 'audit' ? '独立审计用户 Skill' : phaseLabels[progress?.phase] || '等待开始生成分镜'}</b><span>${current ? `第 ${current.id} 次请求 · ${requestLabels[current.kind]} · ${receiveLabels[current.phase]}${previousPhase} · 单次 ${duration(current.elapsedMs)}` : progress?.status === 'running' ? '正在本地准备请求' : '开始后实时显示当前阶段与各部分耗时'}</span></div>
     <div class="workflow-progress-grid">
       <div class="workflow-progress-metric ${progress?.phase === 'preparing' ? 'active' : ''}"><div><b>01 提示词准备</b><strong>${preparing ? duration(progress.preparationMs) : '—'}</strong></div><small>${promptInfo}</small></div>
-      <div class="workflow-progress-metric ${['candidate', 'repair'].includes(progress?.phase) ? 'active' : ''}"><div><b>02 大纲 / 分镜生成</b><strong>${progress?.generationCount ? duration(progress.generationMs) : '—'}</strong></div><small>生成与修正累计 ${progress?.generationCount || 0} 次请求</small></div>
+      <div class="workflow-progress-metric ${['candidate', 'repair'].includes(progress?.phase) ? 'active' : ''}"><div><b>02 ${textStage ? `${stageName}生成` : '大纲 / 分镜生成'}</b><strong>${progress?.generationCount ? duration(progress.generationMs) : '—'}</strong></div><small>生成与修正累计 ${progress?.generationCount || 0} 次请求</small></div>
       <div class="workflow-progress-metric ${current?.phase === 'thinking' && progress?.status === 'running' ? 'active' : ''}"><div><b>03 模型思考</b><strong>${duration(progress?.thinkingMs)}</strong></div><small>${esc(thinkingLabel)} · ${progress?.thinkingMs !== null && progress?.thinkingMs !== undefined ? '正文前思考接收窗口' : '尚未观测到思考片段'}</small></div>
-      <div class="workflow-progress-metric ${progress?.phase === 'audit' ? 'active' : ''}"><div><b>04 独立审计 · ${customAudit ? '用户 Skill' : '60 项'}</b><strong>${progress?.auditCount ? duration(progress.auditMs) : '—'}</strong></div><small>审计 ${progress?.auditCount || 0} 次 · 自动回炉 ${progress?.repairCount || 0} / ${progress?.maxRepairs ?? 1} 次${auditIgnored ? ' · 失败已忽略' : ''}</small></div>
+      <div class="workflow-progress-metric ${progress?.phase === 'audit' ? 'active' : ''}"><div><b>04 ${plainStage ? '结果校验' : `独立审计 · ${customAudit ? '用户 Skill' : '60 项'}`}</b><strong>${progress?.auditCount ? duration(progress.auditMs) : '—'}</strong></div><small>${plainStage ? '仅校验当前步骤的结果结构' : `审计 ${progress?.auditCount || 0} 次 · 自动回炉 ${progress?.repairCount || 0} / ${progress?.maxRepairs ?? 1} 次${auditIgnored ? ' · 失败已忽略' : ''}`}</small></div>
     </div>
     <div class="workflow-progress-foot"><span>${firstResponse}${current ? ` · 已收思考 ${current.reasoningChars.toLocaleString()} / 正文 ${current.outputChars.toLocaleString()} 字符` : ''}</span><span>思考耗时已包含在生成 / 审计中；提示词准备仅统计本地组装。</span></div></div></details>`;
 }
@@ -1404,15 +1440,15 @@ function videoNavigationTemplate() {
   const prompts = project.outputs.storyboard?.prompts || [];
   const count = prompts.length || state.items?.length || 0;
   const items = Array.from({ length: count }, (_value, index) => state.items?.[index] || {});
-  const completed = items.filter(item => getSelectedVideoVersion(item)).length;
+  const completed = items.filter(videoItemIsComplete).length;
   const generating = runningGenerationStep() === 'video';
   const active = generating ? items.findIndex(item => ['creating', 'queued', 'running', 'downloading'].includes(item.status)) : -1;
   const selected = Number.isInteger(state.navigationShotIndex) && state.navigationShotIndex >= 0 && state.navigationShotIndex < count ? state.navigationShotIndex : Math.max(0, active);
   const buttons = items.map((item, index) => {
     const busy = generating && ['creating', 'queued', 'running', 'downloading'].includes(item.status);
     const version = getSelectedVideoVersion(item);
-    const status = busy ? '正在生成' : item.status === 'failed' ? version ? '重新生成失败，已有版本保留' : '生成失败' : version ? '已完成' : item.status === 'certification' ? '等待真人认证' : '未生成';
-    return `<button type="button" class="video-nav-shot${selected === index ? ' selected' : ''}${busy ? ' is-generating' : version ? ' complete' : ''}${item.status === 'failed' ? ' failed' : ''}" data-video-nav-index="${index}" aria-current="${selected === index ? 'true' : 'false'}" aria-label="镜头 ${index + 1}，${status}，点击定位" title="镜头 ${index + 1} · ${status}"><span>${index + 1}</span>${busy ? '<i class="video-nav-spinner" aria-hidden="true"></i>' : version ? '<i class="video-nav-check" aria-hidden="true">√</i>' : ''}</button>`;
+    const status = busy ? '正在生成' : item.status === 'failed' ? version ? '重新生成失败，已有版本保留' : '生成失败' : videoItemIsComplete(item) ? '已完成' : version ? '已有历史视频，当前分镜待生成' : item.status === 'certification' ? '等待真人认证' : '未生成';
+    return `<button type="button" class="video-nav-shot${selected === index ? ' selected' : ''}${busy ? ' is-generating' : videoItemIsComplete(item) ? ' complete' : ''}${item.status === 'failed' ? ' failed' : ''}" data-video-nav-index="${index}" aria-current="${selected === index ? 'true' : 'false'}" aria-label="镜头 ${index + 1}，${status}，点击定位" title="镜头 ${index + 1} · ${status}"><span>${index + 1}</span>${busy ? '<i class="video-nav-spinner" aria-hidden="true"></i>' : videoItemIsComplete(item) ? '<i class="video-nav-check" aria-hidden="true">√</i>' : ''}</button>`;
   }).join('');
   return `<div class="video-navigation-panel" id="videoNavigator"><div class="video-navigation-heading"><b>视频分镜进度</b><span role="status">${active >= 0 ? `正在生成镜头 ${active + 1} / ${count}` : count ? completed === count ? '全部镜头已有视频' : '点击编号定位对应镜头' : '生成分镜后显示镜头列表'}</span><strong>已完成 ${completed} / ${count}</strong></div><nav class="video-navigation-shots" aria-label="定位视频镜头">${buttons || '<span class="video-navigation-empty">暂无分镜</span>'}</nav></div>`;
 }
@@ -1464,7 +1500,7 @@ function regenerateVideoShot(index) {
   if (project.running) return showToast('当前任务正在生成，请先完成或停止，再重新生成此镜头。');
   const prompts = project.outputs.storyboard?.prompts || [];
   if (!Number.isInteger(index) || !prompts[index]) return showToast('请先准备此镜头的分镜，再重新生成视频。');
-  return generateSeedanceVideos({ token: ++generationRun, indexes: [index], mode: 'confirm' });
+  return generateSeedanceVideos({ token: generateRunToken(), indexes: [index], mode: 'confirm' });
 }
 
 function updateWorkflowProgressPanel() {
@@ -1554,6 +1590,7 @@ function bindEvents() {
   document.querySelector('#stopRunningTask')?.addEventListener('click', () => { stopCurrentGeneration(); renderWithoutMovingPage(); showToast('已停止当前任务，已完成的成果仍保留'); });
   document.querySelector('#startGenerate').addEventListener('click', () => startGeneration());
   document.querySelector('#emptyStart')?.addEventListener('click', () => { if (project.running) return; project.script = demoScript; saveProject(); render(); startGeneration(); });
+  document.querySelector('#generateEmptyCurrentStage')?.addEventListener('click', () => startGeneration(false, { fullAuto: false }));
   document.querySelector('#useDemo').addEventListener('click', () => { if (project.running) return; project.script = demoScript; project.title = '失控的婚礼'; saveProject(); render(); showToast('示例剧本已载入'); });
   document.querySelector('#fileInput').addEventListener('change', readFile);
   document.querySelector('#newProject').addEventListener('click', createNewProject);
@@ -1578,7 +1615,10 @@ function bindEvents() {
   });
   document.querySelector('#copyOutput').addEventListener('click', copyOutput);
   document.querySelector('#rerunStep')?.addEventListener('click', rerunCurrentStage);
-  document.querySelector('#generateVideo')?.addEventListener('click', () => { if (!project.running) generateVideoStage(++generationRun); });
+  document.querySelector('#confirmNextTextStage')?.addEventListener('click', confirmAndGenerateNextStage);
+  const regenerateAssetPrompts = document.querySelector('#regenerateAssetPrompts');
+  if (regenerateAssetPrompts) { regenerateAssetPrompts.disabled = project.running; regenerateAssetPrompts.addEventListener('click', () => startGeneration(false, { fullAuto: false, stage: 'assets' })); }
+  document.querySelector('#generateVideo')?.addEventListener('click', () => { if (!project.running) generateVideoStage(generateRunToken()); });
   document.querySelector('#openSettings').addEventListener('click', openStoryboardSettings);
   document.querySelector('#openImageSettings')?.addEventListener('click', openImageSettings);
   document.querySelector('#openSeedanceSettings').addEventListener('click', openSeedanceSettings);
@@ -1641,9 +1681,9 @@ function bindEvents() {
     const prompts = project.outputs.storyboard?.prompts || [];
     const state = alignVideoGenerationItems(prompts);
     const nextIndex = state.items.findIndex((item) => item.status !== 'success');
-    if (nextIndex >= 0) generateSeedanceVideos({ token: ++generationRun, indexes: [nextIndex], mode: 'confirm' });
+    if (nextIndex >= 0) generateSeedanceVideos({ token: generateRunToken(), indexes: [nextIndex], mode: 'confirm' });
   });
-  document.querySelector('#generateAllVideos')?.addEventListener('click', () => generateSeedanceVideos({ token: ++generationRun, mode: 'batch' }));
+  document.querySelector('#generateAllVideos')?.addEventListener('click', () => generateSeedanceVideos({ token: generateRunToken(), mode: 'batch' }));
   document.querySelector('#openVideoFolder')?.addEventListener('click', openVideoOutputFolder);
   document.querySelectorAll('[data-show-video-index]').forEach((button) => button.addEventListener('click', () => showGeneratedVideo(Number(button.dataset.showVideoIndex))));
   document.querySelectorAll('[data-generate-video-index]').forEach((button) => button.addEventListener('click', () => regenerateVideoShot(Number(button.dataset.generateVideoIndex))));
@@ -1801,20 +1841,24 @@ function bindEvents() {
   });
 }
 
-function stopCurrentGeneration() {
-  generationSkillImportSequence += 1;
-  generationSkillImport = null;
-  generationSkillPreview = null;
-  generationSkillHistorySelection = null;
-  generationRun += 1;
-  const stoppedPipeline = autoPipelineRun;
+function stopCurrentGeneration(ownerProject = project) {
+  if (ownerProject === project || generationSkillImport?.ownerProject === ownerProject) {
+    generationSkillImportSequence += 1;
+    generationSkillImport = null;
+  }
+  if (generationSkillPreview?.ownerProject === ownerProject) generationSkillPreview = null;
+  if (generationSkillHistorySelection?.ownerProject === ownerProject) generationSkillHistorySelection = null;
+  const ownsJob = activeBackgroundProject() === ownerProject;
+  if (ownsJob || ownerProject.running || !activeBackgroundProject()) generationRun += 1;
+  if (pendingVideoResume?.ownerProject === ownerProject) pendingVideoResume = null;
+  const stoppedPipeline = autoPipelineRun?.ownerProject === ownerProject ? autoPipelineRun : null;
   if (stoppedPipeline) {
     stoppedPipeline.ownerProject.autoPipeline = { ...stoppedPipeline.ownerProject.autoPipeline, status: 'stopped', error: '已停止后续生成，已完成的成果仍保留。', finishedAt: Date.now() };
     stoppedPipeline.ownerProject.running = false;
     autoPipelineRun = null;
   }
-  const stoppedWorkflow = workflowRun;
-  if (workflowRun) {
+  const stoppedWorkflow = workflowRun?.ownerProject === ownerProject ? workflowRun : null;
+  if (stoppedWorkflow) {
     if (workflowRun.generation?.provider === 'codex-subscription' && window.storyforgeAI?.cancelWorkflow) {
       Promise.resolve(window.storyforgeAI.cancelWorkflow({ runId: workflowRun.runId, projectId: workflowRun.projectId })).catch(() => { /* Run guards also reject any late response. */ });
     }
@@ -1824,7 +1868,7 @@ function stopCurrentGeneration() {
     persistWorkflowProgress(workflowRun.ownerProject);
     workflowRun = null;
   }
-  const run = codexImageRun;
+  const run = codexImageRun?.ownerProject === ownerProject ? codexImageRun : null;
   if (run) {
     codexImageRun = null;
     if (run.jobId && window.storyforgeAI?.cancelCodexImage) {
@@ -1836,30 +1880,35 @@ function stopCurrentGeneration() {
     });
     run.ownerProject.running = false;
   }
-  const videoState = project.videoGeneration;
+  if (videoRun?.ownerProject === ownerProject) videoRun = null;
+  const videoState = ownerProject.videoGeneration;
   if (videoState?.status === 'running') {
     videoState.items = (videoState.items || []).map((savedItem) => {
       const item = normalizeVideoItemVersions(savedItem);
       if (['creating', 'queued', 'running', 'downloading'].includes(item.status)) {
         const resumable = item.taskProvider === 'comfy' && item.taskId;
-        item.status = resumable ? 'pending' : getSelectedVideoVersion(item) ? 'success' : 'pending';
+        item.status = resumable ? 'pending' : videoItemIsComplete(item) ? 'success' : 'pending';
         if (!resumable) item.taskId = '';
       }
       return item;
     });
-    videoState.generatedCount = videoState.items.filter((item) => getSelectedVideoVersion(item)).length;
+    videoState.generatedCount = videoState.items.filter((item) => videoItemIsComplete(item)).length;
     const allSaved = videoState.items.length > 0 && videoState.generatedCount === videoState.items.length && videoState.items.every(item => item.status === 'success');
     videoState.status = allSaved ? 'complete' : 'pending';
-    if (allSaved && !project.completed.includes('video')) project.completed.push('video');
+    if (allSaved && !ownerProject.completed.includes('video')) ownerProject.completed.push('video');
   }
-  if (!project.running && !run && !stoppedWorkflow && !stoppedPipeline) return;
-  project.running = false;
-  saveProject();
+  if (!ownerProject.running && !run && !stoppedWorkflow && !stoppedPipeline) return;
+  ownerProject.running = false;
+  saveProject(ownerProject);
 }
 
 function createNewProject() {
   clearResultRequest = null;
-  stopCurrentGeneration();
+  viewNavigationSequence += 1;
+  generationSkillImportSequence += 1;
+  generationSkillImport = null;
+  generationSkillPreview = null;
+  generationSkillHistorySelection = null;
   const newProject = createProject();
   projectLibrary.projects.push(newProject);
   projectLibrary.activeProjectId = newProject.id;
@@ -1872,7 +1921,11 @@ function createNewProject() {
 function switchProject(projectId) {
   if (!projectId || projectId === project.id) return;
   clearResultRequest = null;
-  stopCurrentGeneration();
+  viewNavigationSequence += 1;
+  generationSkillImportSequence += 1;
+  generationSkillImport = null;
+  generationSkillPreview = null;
+  generationSkillHistorySelection = null;
   const nextProject = projectLibrary.projects.find((item) => item.id === projectId);
   if (!nextProject) return showToast('没有找到这个项目');
   projectLibrary.activeProjectId = nextProject.id;
@@ -1886,7 +1939,7 @@ function deleteProject(projectId) {
   const target = projectLibrary.projects.find((item) => item.id === projectId);
   if (!target || projectLibrary.projects.length <= 1) return;
   if (!window.confirm(`确定删除“${target.title}”吗？此操作无法撤销。`)) return;
-  if (target.id === project.id) stopCurrentGeneration();
+  if (target.running || activeBackgroundProject() === target) stopCurrentGeneration(target);
   projectLibrary.projects = projectLibrary.projects.filter((item) => item.id !== projectId);
   if (target.id === project.id) {
     project = projectLibrary.projects[0];
@@ -2221,7 +2274,7 @@ function renderAIWorkflow(data, usage, model, generation = {}) {
   const checklistBody = checklist.length ? `<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">CAST CHECKLIST</span><h4>人物参考图清单</h4></div><span>${checklist.filter((item) => item.requiresReferenceImage ?? item.requiresTurnaround).length} 人需要独立参考图</span></div><div class="asset-checklist">${checklist.map((item) => { const required = item.requiresReferenceImage ?? item.requiresTurnaround; return `<div><b>${esc(String(item.name || ''))}</b><span>${esc(String(item.roleType || '人物'))}</span><div class="asset-flags"><i class="${item.speaks ? 'yes' : ''}">对白</i><i class="${item.drivesPlot ? 'yes' : ''}">推动剧情</i><i class="${item.recurring ? 'yes' : ''}">反复出现</i><i class="${item.needsCloseUp ? 'yes' : ''}">特写</i></div><em class="${required ? 'required' : ''}">${required ? '上传单人参考图' : '归入功能人物'}</em><small>${esc(String(item.reason || ''))}</small></div>`; }).join('')}</div></section>` : '';
   const matrixBody = differenceMatrix.length ? `<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">FACE DIFFERENCE MATRIX</span><h4>人物差异化视觉锚点</h4></div><span>防止角色同脸</span></div><div class="asset-matrix"><div class="asset-matrix-row header"><b>角色 / 脸谱</b><b>面部锚点</b><b>发型 / 体态</b><b>服装 / 排除项</b></div>${differenceMatrix.map((item) => `<div class="asset-matrix-row"><b>${esc(String(item.name || ''))}<small>${esc(String(item.faceCode || ''))} · ${esc(String(item.ageRange || item.ageImpression || ''))}</small></b><span>${esc([item.faceShape, item.eyeShape, item.brows, item.noseLips, item.jawCheekbones].filter(Boolean).join('；'))}</span><span>${esc([item.hair, item.bodyType].filter(Boolean).join('；'))}</span><span>${esc([item.clothingSilhouette, item.signatureAccessory, item.differentFrom].filter(Boolean).join('；'))}</span></div>`).join('')}</div></section>` : '';
   const promptCards = promptItems.map((item, index) => `<article class="asset-prompt-card"><div class="asset-prompt-head"><div><span>${esc(String(item.type))}</span><h4>${esc(String(item.name || '参考图'))}</h4><code>${esc(String(item.fileName || ''))}</code></div><button class="copy-asset-prompt" data-asset-prompt-index="${index}">复制提示词</button></div>${item.description ? `<p>${esc(String(item.description))}</p>` : ''}${Array.isArray(item.exclusions) && item.exclusions.length ? `<div class="asset-exclusions"><b>排除：</b>${item.exclusions.map((value) => `<span>${esc(String(value))}</span>`).join('')}</div>` : ''}${Array.isArray(item.spatialAnchors) && item.spatialAnchors.length ? `<div class="asset-exclusions anchors"><b>空间锚点：</b>${item.spatialAnchors.map((value) => `<span>${esc(String(value))}</span>`).join('')}</div>` : ''}<pre>${esc(item.prompt)}</pre></article>`).join('');
-  const assetsBody = `${checklistBody}${matrixBody}<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">REFERENCE IMAGE PROMPTS</span><h4>参考图生成提示词</h4></div><button id="copyAllAssetPrompts">复制全部提示词</button></div><div class="asset-prompt-list">${promptCards}</div></section>`;
+  const assetsBody = `${checklistBody}${matrixBody}<section class="asset-section"><div class="asset-section-head"><div><span class="section-kicker">REFERENCE IMAGE PROMPTS</span><h4>参考图生成提示词</h4></div><div class="shot-actions"><button id="regenerateAssetPrompts">重新生成资产提示词</button><button id="copyAllAssetPrompts">复制全部提示词</button></div></div><div class="asset-prompt-list">${promptCards}</div></section>`;
   const usageText = usage ? `输入 ${usage.prompt_tokens || 0} · 输出 ${usage.completion_tokens || 0} tokens${provider === 'codex-subscription' ? ' · 使用订阅限额' : ''}` : provider === 'codex-subscription' ? '使用 ChatGPT / Codex 订阅限额' : '用量由 DeepSeek 账户结算';
   const storyboardRecords = skill21 ? Object.fromEntries(
     ['voiceSources', 'voiceFragments', 'deferredVoices', 'blockers', 'auditRecord', 'verification']
@@ -2328,7 +2381,7 @@ function alignAssetGenerationItems(prompts, ownerProject = project) {
   state.generatedCount = state.items.filter((item) => item.files.length).length;
   state.status = state.generatedCount === prompts.length && prompts.length ? 'complete' : 'pending';
   ownerProject.completed = Array.isArray(ownerProject.completed) ? ownerProject.completed : [];
-  if (state.status === 'complete') {
+  if (state.status === 'complete' && !(ownerProject.outputs.storyboard?.revision && textStageDependencyError('video', ownerProject))) {
     if (!ownerProject.completed.includes('assets')) ownerProject.completed.push('assets');
   } else ownerProject.completed = ownerProject.completed.filter(id => id !== 'assets');
   ownerProject.assetGeneration = state;
@@ -2387,7 +2440,7 @@ function selectVideoReference(shotIndex, referenceNumber, assetItemIndex, fileIn
   return true;
 }
 
-function resetVideoItemAfterReferenceChange(item, state) {
+function resetVideoItemAfterReferenceChange(item, state, ownerProject = project) {
   if (!item || !state) return;
   if (!['creating', 'queued', 'running', 'downloading'].includes(item.status)) {
     item.status = 'pending';
@@ -2396,9 +2449,9 @@ function resetVideoItemAfterReferenceChange(item, state) {
   }
   state.status = 'pending';
   state.lastError = '';
-  state.generatedCount = state.items.filter((videoItem) => getSelectedVideoVersion(videoItem)).length;
-  project.completed = project.completed.filter((id) => id !== 'video');
-  reconcilePortraitCertification(state);
+  state.generatedCount = state.items.filter((videoItem) => videoItemIsComplete(videoItem)).length;
+  ownerProject.completed = ownerProject.completed.filter((id) => id !== 'video');
+  reconcilePortraitCertification(state, ownerProject);
 }
 
 function samePortraitReference(input, file) {
@@ -2410,15 +2463,15 @@ function samePortraitReference(input, file) {
   return input.assetItemIndex === file.assetItemIndex && input.fileIndex === file.fileIndex;
 }
 
-function reconcilePortraitCertification(state) {
+function reconcilePortraitCertification(state, ownerProject = project) {
   const pending = state?.pendingCertification;
   if (!pending?.blockedInputs?.length) return false;
   const index = Number(pending.shotIndex);
   const item = state.items?.[index];
   const plan = resolveStrictReferencePlan({
-    prompt: effectiveVideoPrompt(index, project.outputs.storyboard?.prompts?.[index], state),
-    shot: project.outputs.storyboard?.shots?.[index] || {},
-    assetItems: project.assetGeneration?.items || [],
+    prompt: effectiveVideoPrompt(index, ownerProject.outputs.storyboard?.prompts?.[index], state),
+    shot: ownerProject.outputs.storyboard?.shots?.[index] || {},
+    assetItems: ownerProject.assetGeneration?.items || [],
     savedBindings: item?.referenceBindings || {},
   });
   // A platform rejection belongs to the submitted files, not their list slots.
@@ -2428,7 +2481,7 @@ function reconcilePortraitCertification(state) {
   });
   state.pendingCertification = blockedInputs.length ? { ...pending, blockedInputs } : null;
   const changed = blockedInputs.length !== pending.blockedInputs.length;
-  if (changed && !blockedInputs.length) resetVideoItemAfterReferenceChange(item, state);
+  if (changed && !blockedInputs.length) resetVideoItemAfterReferenceChange(item, state, ownerProject);
   return changed;
 }
 
@@ -2575,6 +2628,7 @@ function isValidTrustedAssetId(value) {
 
 function savePortraitCertificationAndResume() {
   const ownerProject = project;
+  if (backgroundGenerationBlocked(ownerProject)) return;
   const state = project.videoGeneration;
   if (reconcilePortraitCertification(state)) {
     saveProject(); renderWithoutMovingPage();
@@ -2604,13 +2658,16 @@ function savePortraitCertificationAndResume() {
   showToast('可信素材已绑定，正在自动继续生成');
   const resumeToken = generationRun;
   const resumeViewSequence = viewNavigationSequence;
+  const resumeRun = { ownerProject, token: resumeToken };
+  pendingVideoResume = resumeRun;
   window.setTimeout(() => {
-    if (generationRun !== resumeToken || project !== ownerProject || ownerProject.videoGeneration !== state || ownerProject.running) return;
+    if (pendingVideoResume !== resumeRun || generationRun !== resumeToken || !isRegisteredProject(ownerProject) || ownerProject.videoGeneration !== state || ownerProject.running) return;
+    pendingVideoResume = null;
     if (resumeAuto) {
       const run = { ownerProject, projectId: ownerProject.id, inputScript: ownerProject.script, stageSkills: structuredClone(normalizeGenerationSkills(ownerProject.generationSkills)), viewSequence: resumeViewSequence };
       autoPipelineRun = run;
       generateAutoPipelineVideos(run, resumeIndexes).catch(error => finishAutoPipeline(run, 'failed', cleanRemoteError(error, '全流程生成失败，已保留完成的成果')));
-    } else generateSeedanceVideos({ token: ++generationRun, indexes: resumeIndexes, mode, viewSequence: resumeViewSequence });
+    } else generateSeedanceVideos({ token: generateRunToken(ownerProject), indexes: resumeIndexes, mode, viewSequence: resumeViewSequence, ownerProject });
   }, 0);
 }
 
@@ -2675,6 +2732,7 @@ async function selectLocalAssetImages(index) {
   if (project.running) return;
   const ownerProject = project;
   const token = generationRun;
+  const ownerRevision = ownerProject.asyncRevision || 0;
   const scrollPositions = capturePageScrollPositions();
   try {
     const result = await window.storyforgeAI.selectLocalAssetImages({
@@ -2684,7 +2742,7 @@ async function selectLocalAssetImages(index) {
       assetName: String(prompt.name || `素材${index + 1}`),
       assetType: String(prompt.type || '参考图'),
     });
-    if (project !== ownerProject || generationRun !== token || project.running) return;
+    if (project !== ownerProject || generationRun !== token || (ownerProject.asyncRevision || 0) !== ownerRevision || project.running) return;
     if (result?.canceled || !result?.files?.length) return;
     const state = alignAssetGenerationItems(prompts);
     const existing = Array.isArray(state.items[index].files) ? state.items[index].files : [];
@@ -2736,12 +2794,17 @@ async function showLocalAssetImage(itemIndex, fileIndex) {
 }
 
 function isCurrentCodexImageRun(run) {
-  return codexImageRun === run && run.token === generationRun && project === run.ownerProject && project.id === run.projectId;
+  return codexImageRun === run && run.token === generationRun && isRegisteredProject(run.ownerProject) && run.ownerProject.id === run.projectId;
 }
 
 async function generateCodexImageAssets(indexes = null, { pipelineRun = null } = {}) {
-  if ((project.running && !isCurrentAutoPipelineRun(pipelineRun)) || codexImageRun) return showToast('当前生成任务进行中，请稍候或先停止');
-  const ownerProject = project;
+  const ownerProject = pipelineRun?.ownerProject || project;
+  if (backgroundGenerationBlocked(ownerProject)) return;
+  if ((ownerProject.running && !isCurrentAutoPipelineRun(pipelineRun)) || codexImageRun) return showToast('当前生成任务进行中，请稍候或先停止');
+  if (ownerProject.outputs.storyboard?.revision) {
+    const stale = textStageDependencyError('video', ownerProject);
+    if (stale) return showToast(stale);
+  }
   const prompts = ownerProject.outputs.assets?.promptItems || [];
   if (!prompts.length) return showToast('第三步还没有可生成的参考图提示词');
   if (!window.storyforgeAI?.generateCodexImage) return showToast('当前环境无法调用本机 Codex，请使用更新后的桌面版');
@@ -2761,7 +2824,7 @@ async function generateCodexImageAssets(indexes = null, { pipelineRun = null } =
   let generatedCount = 0;
   let failedCount = 0;
   let needsSettings = false;
-  saveProject(); renderWithoutMovingPage();
+  saveProject(ownerProject); renderWithoutMovingPage();
   try {
     await refreshCodexImageStatus();
     if (!isCurrentCodexImageRun(run)) return;
@@ -2769,7 +2832,7 @@ async function generateCodexImageAssets(indexes = null, { pipelineRun = null } =
       needsSettings = true;
       throw new Error(codexImageStatus.error || `${codexImageStatusText()}。请先检查本机 Codex 的安装和 ChatGPT 登录状态。`);
     }
-    closeCodexImageSettings();
+    if (ownerProject === project) closeCodexImageSettings();
     for (const index of validIndexes) {
       if (!isCurrentCodexImageRun(run)) return;
       const prompt = prompts[index];
@@ -2777,7 +2840,7 @@ async function generateCodexImageAssets(indexes = null, { pipelineRun = null } =
       run.jobId = `codex-image-${createProjectId()}`;
       state.items[index] = { ...state.items[index], status: 'generating', error: '' };
       ownerProject.completed = ownerProject.completed.filter((id) => id !== 'assets');
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       try {
         const result = await window.storyforgeAI.generateCodexImage({
           projectId: run.projectId,
@@ -2820,7 +2883,7 @@ async function generateCodexImageAssets(indexes = null, { pipelineRun = null } =
       }
       run.jobId = null;
       state.generatedCount = state.items.filter((item) => item.files.length).length;
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
     }
   } catch (error) {
     if (!isCurrentCodexImageRun(run)) return;
@@ -2830,9 +2893,9 @@ async function generateCodexImageAssets(indexes = null, { pipelineRun = null } =
       codexImageRun = null;
       ownerProject.running = isCurrentAutoPipelineRun(pipelineRun);
       alignAssetGenerationItems(prompts, ownerProject);
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       showToast(state.lastError || `GPT 已生成并保存 ${generatedCount} 张参考图${failedCount ? `，${failedCount} 项失败，可单项重试` : state.status === 'complete' ? '，第三步已完成' : ''}`);
-      if (needsSettings) {
+      if (needsSettings && ownerProject === project) {
         codexImageSettingsOpen = true;
         const modal = document.querySelector('#codexImageSettingsModal');
         if (modal) modal.hidden = false;
@@ -2842,40 +2905,43 @@ async function generateCodexImageAssets(indexes = null, { pipelineRun = null } =
 }
 
 function confirmLocalAssets({ automatic = false, pipelineRun = null } = {}) {
-  const prompts = project.outputs.assets?.promptItems || [];
-  const state = alignAssetGenerationItems(prompts);
+  const ownerProject = pipelineRun?.ownerProject || project;
+  if (backgroundGenerationBlocked(ownerProject)) return false;
+  const prompts = ownerProject.outputs.assets?.promptItems || [];
+  const state = alignAssetGenerationItems(prompts, ownerProject);
   const missing = state.items.filter((item) => !item.files.length);
   if (!prompts.length && !automatic) return showToast('第三步没有可确认的素材清单');
   if (missing.length) return showToast(`还有 ${missing.length} 项没有参考图，请先生成或上传`);
   state.status = 'complete';
   state.generatedCount = state.items.length;
-  if (!project.completed.includes('assets')) project.completed.push('assets');
+  if (!ownerProject.completed.includes('assets')) ownerProject.completed.push('assets');
   if (automatic) focusGenerationStep('video', pipelineRun);
   else selectWorkflowStep('video');
-  if (!project.outputs.video) project.outputs.video = makeOutput('video');
-  alignVideoGenerationItems(project.outputs.storyboard?.prompts || []);
-  saveProject(); renderWithoutMovingPage();
+  if (!ownerProject.outputs.video) ownerProject.outputs.video = { title: videoOutputTitle(activeVideoProvider(ownerProject)), subtitle: '按第二步分镜逐条生成并保存 MP4', time: '数分钟 / 镜头', body: '' };
+  alignVideoGenerationItems(ownerProject.outputs.storyboard?.prompts || [], ownerProject);
+  saveProject(ownerProject); renderWithoutMovingPage();
   if (!automatic) showToast('参考图已确认，可以逐个或批量生成视频');
   return true;
 }
 
-async function generateImageAssets({ token, indexes = null, autoAdvance = true }) {
-  const imageFocus = { ownerProject: project, viewSequence: viewNavigationSequence };
+async function generateImageAssets({ token, indexes = null, autoAdvance = true, ownerProject = project }) {
+  if (backgroundGenerationBlocked(ownerProject)) return;
+  const imageFocus = { ownerProject: ownerProject, viewSequence: viewNavigationSequence };
   if (!IMAGE_MODEL_GENERATION_ENABLED) return showToast('第三步模型生图已暂停，请为每项上传本地参考图');
-  const prompts = project.outputs.assets?.promptItems || [];
+  const prompts = ownerProject.outputs.assets?.promptItems || [];
   if (!prompts.length) return showToast('第三步还没有可生成的参考图提示词');
   const provider = imageProvider;
   const providerStatus = activeImageStatus(provider);
   if (!window.storyforgeAI || !providerStatus.configured) {
-    project.running = false;
+    ownerProject.running = false;
     focusGenerationStep('assets', imageFocus);
-    saveProject(); renderWithoutMovingPage();
+    saveProject(ownerProject); renderWithoutMovingPage();
     openImageSettings();
     setImageMessage(`请先配置${provider === 'openai' ? ' OpenAI' : '火山方舟'} API Key。保存后会自动继续第三步。`, 'error');
     return;
   }
 
-  const state = alignAssetGenerationItems(prompts);
+  const state = alignAssetGenerationItems(prompts, ownerProject);
   const providerChanged = (state.provider || 'seedream') !== provider
     || state.model !== providerStatus.model
     || state.size !== providerStatus.size
@@ -2894,29 +2960,29 @@ async function generateImageAssets({ token, indexes = null, autoAdvance = true }
     : prompts.map((_, index) => index).filter((index) => providerChanged || state.items[index].status !== 'success');
   if (!requested.length) {
     if (autoAdvance) {
-      if (!project.completed.includes('assets')) project.completed.push('assets');
+      if (!ownerProject.completed.includes('assets')) ownerProject.completed.push('assets');
       focusGenerationStep('video', imageFocus);
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
     } else showToast('所有参考图都已经生成');
     return;
   }
 
-  project.completed = project.completed.filter((id) => id !== 'assets');
+  ownerProject.completed = ownerProject.completed.filter((id) => id !== 'assets');
   focusGenerationStep('assets', imageFocus);
-  project.running = true;
+  ownerProject.running = true;
   state.status = 'running';
-  saveProject(); renderWithoutMovingPage();
+  saveProject(ownerProject); renderWithoutMovingPage();
 
   for (const index of requested) {
-    if (token !== generationRun) return;
+    if (token !== generationRun || !isRegisteredProject(ownerProject)) return;
     const prompt = prompts[index];
     state.items[index] = { ...state.items[index], status: 'generating', error: '' };
     state.generatedCount = state.items.filter((item) => item.status === 'success').length;
-    saveProject(); renderWithoutMovingPage();
+    saveProject(ownerProject); renderWithoutMovingPage();
     try {
       const task = {
-        projectId: project.id,
-        projectTitle: project.title,
+        projectId: ownerProject.id,
+        projectTitle: ownerProject.title,
         index,
         prompt: prompt.prompt,
         fileName: prompt.fileName,
@@ -2926,7 +2992,7 @@ async function generateImageAssets({ token, indexes = null, autoAdvance = true }
       const result = provider === 'openai'
         ? await window.storyforgeAI.generateOpenAIImage(task)
         : await window.storyforgeAI.generateSeedreamImage({ ...task, model: state.model });
-      if (token !== generationRun) return;
+      if (token !== generationRun || !isRegisteredProject(ownerProject)) return;
       state.items[index] = {
         ...state.items[index],
         ...result,
@@ -2936,29 +3002,29 @@ async function generateImageAssets({ token, indexes = null, autoAdvance = true }
       };
       state.outputDirectory = result.outputDirectory || state.outputDirectory;
     } catch (error) {
-      if (token !== generationRun) return;
+      if (token !== generationRun || !isRegisteredProject(ownerProject)) return;
       const message = cleanRemoteError(error, '生成失败');
       state.items[index] = { ...state.items[index], status: 'failed', error: message };
       if (/尚未开通|API Key 无效|没有.*权限|额度不足|余额不足|组织验证/.test(message)) state.lastError = message;
     }
     state.generatedCount = state.items.filter((item) => item.status === 'success').length;
-    saveProject(); renderWithoutMovingPage();
+    saveProject(ownerProject); renderWithoutMovingPage();
     if (state.lastError) break;
   }
 
-  if (token !== generationRun) return;
+  if (token !== generationRun || !isRegisteredProject(ownerProject)) return;
   const failed = state.items.filter((item) => item.status === 'failed').length;
   const allComplete = state.items.length === prompts.length && state.items.every((item) => item.status === 'success');
   state.status = allComplete ? 'complete' : failed ? 'partial' : 'pending';
   state.generatedCount = state.items.filter((item) => item.status === 'success').length;
-  project.running = false;
+  ownerProject.running = false;
   if (allComplete) {
-    if (!project.completed.includes('assets')) project.completed.push('assets');
+    if (!ownerProject.completed.includes('assets')) ownerProject.completed.push('assets');
     if (autoAdvance) focusGenerationStep('video', imageFocus);
-    saveProject(); renderWithoutMovingPage();
+    saveProject(ownerProject); renderWithoutMovingPage();
     showToast(`${imageProviderLabel(provider)} 已生成并保存 ${state.generatedCount} 张参考图`);
   } else {
-    saveProject(); renderWithoutMovingPage();
+    saveProject(ownerProject); renderWithoutMovingPage();
     showToast(state.lastError || `已生成 ${state.generatedCount} 张，${failed} 张失败，可单独重试`);
   }
 }
@@ -2969,33 +3035,35 @@ async function openAssetOutputFolder() {
 }
 
 function isCurrentAutoPipelineRun(run) {
-  return Boolean(run && autoPipelineRun === run && project === run.ownerProject && project.id === run.projectId);
+  return Boolean(run && autoPipelineRun === run && isRegisteredProject(run.ownerProject) && run.ownerProject.id === run.projectId);
 }
 
 function updateAutoPipelinePhase(run, phase) {
   if (!isCurrentAutoPipelineRun(run)) return false;
   if (run.ownerProject.script !== run.inputScript) throw new Error('全流程已暂停：剧本文本发生更改，请根据最新剧本重新开始。');
-  project.autoPipeline = { ...project.autoPipeline, status: 'running', phase, error: '' };
-  project.running = true;
-  saveProject(); renderWithoutMovingPage();
+  const ownerProject = run.ownerProject;
+  ownerProject.autoPipeline = { ...ownerProject.autoPipeline, status: 'running', phase, error: '' };
+  ownerProject.running = true;
+  saveProject(ownerProject); renderWithoutMovingPage();
   return true;
 }
 
 function finishAutoPipeline(run, status, message = '') {
   if (!isCurrentAutoPipelineRun(run)) return;
-  project.autoPipeline = { ...project.autoPipeline, status, error: message, finishedAt: Date.now() };
-  project.running = false;
+  const ownerProject = run.ownerProject;
+  ownerProject.autoPipeline = { ...ownerProject.autoPipeline, status, error: message, finishedAt: Date.now() };
+  ownerProject.running = false;
   autoPipelineRun = null;
-  saveProject(); renderWithoutMovingPage();
+  saveProject(ownerProject); renderWithoutMovingPage();
   if (message) showToast(message);
 }
 
-function validateAutoVideoPlan() {
-  const storyboard = project.outputs.storyboard;
+function validateAutoVideoPlan(ownerProject = project) {
+  const storyboard = ownerProject.outputs.storyboard;
   if (storyboard?.auditSummary?.finalStatus === '部分通过（存在阻塞）') throw new Error('分镜仍有未交付的阻塞内容，全流程已暂停。请先补充第二步所列信息。');
   const prompts = storyboard?.prompts || [];
   if (!prompts.length) throw new Error('没有可用于视频生成的分镜。');
-  const assets = project.outputs.assets?.promptItems || [];
+  const assets = ownerProject.outputs.assets?.promptItems || [];
   for (let index = 0; index < prompts.length; index += 1) {
     const shot = storyboard.shots?.[index];
     const duration = shot?.duration ?? storyboard.durations?.[index];
@@ -3017,13 +3085,14 @@ function validateAutoVideoPlan() {
 async function continueAutoPipeline(run) {
   try {
     if (!isCurrentAutoPipelineRun(run)) return;
-    validateAutoVideoPlan();
+    const ownerProject = run.ownerProject;
+    validateAutoVideoPlan(ownerProject);
     if (!updateAutoPipelinePhase(run, 'assets')) return;
-    const prompts = project.outputs.assets?.promptItems || [];
+    const prompts = ownerProject.outputs.assets?.promptItems || [];
     if (prompts.length) await generateCodexImageAssets(null, { pipelineRun: run });
     if (!isCurrentAutoPipelineRun(run)) return;
-    if (project.script !== run.inputScript) throw new Error('剧本文本已更改，全流程已暂停。');
-    const assets = alignAssetGenerationItems(prompts);
+    if (ownerProject.script !== run.inputScript) throw new Error('剧本文本已更改，全流程已暂停。');
+    const assets = alignAssetGenerationItems(prompts, ownerProject);
     if (assets.lastError || assets.items.some(item => !item.files?.length || item.status === 'failed')) throw new Error(assets.lastError || '参考图尚未全部生成，全流程已暂停；已生成图片仍保留。');
     if (!confirmLocalAssets({ automatic: true, pipelineRun: run })) throw new Error('参考图尚未准备完成，无法自动进入视频生成。');
     await generateAutoPipelineVideos(run);
@@ -3036,45 +3105,185 @@ async function generateAutoPipelineVideos(run, indexes = null) {
   if (!updateAutoPipelinePhase(run, 'video')) return;
   await generateSeedanceVideos({ token: ++generationRun, indexes, mode: 'batch', stopOnFailure: true, pipelineRun: run });
   if (!isCurrentAutoPipelineRun(run)) return;
-  const state = project.videoGeneration;
+  const state = run.ownerProject.videoGeneration;
   if (state.pendingCertification) throw new Error('视频平台要求完成真人素材认证，已暂停全流程；请在当前镜头完成认证后继续批量生成。');
-  if (!state.items?.length || state.items.some(item => item.status !== 'success') || !project.completed.includes('video')) throw new Error(state.lastError || state.items.find(item => item.error)?.error || '部分视频尚未完成，已暂停全流程，已完成的视频仍保留。');
+  if (!state.items?.length || state.items.some(item => item.status !== 'success') || !run.ownerProject.completed.includes('video')) throw new Error(state.lastError || state.items.find(item => item.error)?.error || '部分视频尚未完成，已暂停全流程，已完成的视频仍保留。');
   finishAutoPipeline(run, 'completed', '全部视频镜头已批量生成并保存。');
 }
 
+function workflowStepForStage(stage) {
+  return stage === 'storyboard' ? 'storyboard' : stage === 'assets' ? 'assets' : 'analysis';
+}
+
+function workflowStageLabel(stage) {
+  return stage === 'outline' ? '分镜大纲' : stage === 'assets' ? '资产提示词' : '分镜脚本';
+}
+
+function scriptFingerprint(value) {
+  let first = 2166136261, second = 2654435769;
+  const source = String(value || '');
+  for (let index = 0; index < source.length; index += 1) {
+    first = Math.imul(first ^ source.charCodeAt(index), 16777619);
+    second = Math.imul(second ^ source.charCodeAt(index), 2246822507);
+  }
+  return `${source.length}-${first >>> 0}-${second >>> 0}`;
+}
+
+function textStageDependencyError(stage, owner = project) {
+  const outputs = owner.outputs || {};
+  const fingerprint = scriptFingerprint(owner.script);
+  if (stage !== 'outline' && outputs.analysis?.sourceFingerprint && outputs.analysis.sourceFingerprint !== fingerprint) return '剧本已更改，请先重新生成并确认分镜大纲。';
+  if (stage === 'storyboard') {
+    if (!outputs.analysis || !currentStoryboardOutline(owner).rows.length) return '请先生成并确认第一步的分镜大纲。';
+    return '';
+  }
+  if (stage === 'assets' || stage === 'video') {
+    if (!outputs.storyboard?.prompts?.length) return '请先确认大纲并生成第二步的分镜脚本。';
+    if (outputs.storyboard.sourceFingerprint && outputs.storyboard.sourceFingerprint !== fingerprint) return '剧本已更改，请先重新生成并确认分镜脚本。';
+    if (outputs.analysis?.revision && outputs.storyboard.outlineRevision !== outputs.analysis.revision) return '大纲已更新，请先确认新大纲并重新生成分镜脚本。';
+  }
+  if (stage === 'video' && outputs.storyboard?.revision && outputs.assets?.storyboardRevision !== outputs.storyboard.revision) return '分镜已更新，请先确认分镜并生成第三步的资产提示词。';
+  return '';
+}
+
+function confirmedStoryboardInput(owner = project) {
+  const board = owner.outputs.storyboard;
+  if (board.stageData) return structuredClone(board.stageData);
+  const assets = { characters: [], scenes: [], groups: [], props: [] };
+  for (const item of owner.outputs.assets?.promptItems || []) {
+    const group = /人物/.test(item.type) ? 'characters' : /场景/.test(item.type) ? 'scenes' : /群像/.test(item.type) ? 'groups' : 'props';
+    assets[group].push({ ...item });
+  }
+  return { storyboard: structuredClone(board), assets };
+}
+
+function renderGeneratedTextStage(response, stage, run) {
+  const owner = run.ownerProject;
+  const fingerprint = scriptFingerprint(run.inputScript);
+  const provenance = { generatedStage: stage, sourceFingerprint: fingerprint, revision: run.runId };
+  if (stage === 'outline') {
+    const rows = response.data?.outline?.rows;
+    if (!Array.isArray(rows) || !rows.length || rows.some(row => !row || !String(row.no || '').trim() || !String(row.scene || '').trim() || !String(row.content || '').trim())) throw new Error('模型没有返回完整的分镜大纲，已保留原有成果。');
+    const outline = buildStoryboardOutline({ shots: rows.map(row => ({ no: row.no, duration: row.duration, scene: row.scene, outline: row.content })) });
+    if (outline.unknownDurationCount || new Set(outline.rows.map(row => row.no)).size !== rows.length) throw new Error('分镜大纲的编号或时长无效，已保留原有成果。');
+    return makeStoryboardOutlineOutput(outline, { ...provenance, generationInfo: `模型：${response.model || run.generation.model || 'deepseek-flash'}` });
+  }
+  if (stage === 'storyboard') {
+    const output = renderAIWorkflow(response.data, response.usage, response.model, run.generation).storyboard;
+    return { ...output, ...provenance, outlineRevision: owner.outputs.analysis?.revision || '', stageData: structuredClone(response.data) };
+  }
+  const confirmed = confirmedStoryboardInput(owner);
+  const output = renderAIWorkflow({ ...confirmed, assets: response.data?.assets }, response.usage, response.model, run.generation).assets;
+  return { ...output, ...provenance, storyboardRevision: owner.outputs.storyboard?.revision || '' };
+}
+
+function backgroundGenerationBlocked(owner = project) {
+  const background = activeBackgroundProject();
+  if (!background || background === owner) return false;
+  showToast(`项目“${background.title}”正在后台生成。可以自由浏览其他项目，开始新任务前请等待它完成或在原项目停止。`);
+  return true;
+}
+
+function manualStageConfirmationTemplate() {
+  if (autoPipelineRun?.ownerProject === project) return '';
+  if (project.activeStep === 'analysis' && project.outputs.analysis) return `<div class="stage-confirmation"><p>分镜大纲已生成。确认后才会生成分镜脚本。</p><button class="next-button" id="confirmNextTextStage" ${project.running ? 'disabled' : ''}>确认大纲，生成分镜脚本 <span>→</span></button></div>`;
+  if (project.activeStep === 'storyboard' && project.outputs.storyboard) return `<div class="stage-confirmation"><p>分镜脚本已生成。确认后才会生成资产提示词。</p><button class="next-button" id="confirmNextTextStage" ${project.running ? 'disabled' : ''}>确认分镜，生成资产提示词 <span>→</span></button></div>`;
+  return '';
+}
+
+function confirmAndGenerateNextStage() {
+  if (project.running) return showToast('当前任务进行中，请完成或停止后再继续');
+  const stage = project.activeStep === 'analysis' ? 'storyboard' : project.activeStep === 'storyboard' ? 'assets' : null;
+  if (stage) return startGeneration(false, { fullAuto: false, stage });
+}
+
+async function startFullAutoGeneration() {
+  if (backgroundGenerationBlocked()) return false;
+  if (project.running) return showToast('当前生成任务进行中，请稍候或先停止');
+  if (!project.script.trim()) return showToast('请先输入或导入一段剧本');
+  const selectedProvider = normalizeStoryboardGeneration(project.storyboardGeneration);
+  if (!window.storyforgeAI || (selectedProvider.provider === 'deepseek' && !deepseekStatus.configured)) {
+    if (selectedProvider.provider === 'codex-subscription') { openCodexTextSettings(); showToast('GPT 订阅生成需要更新后的桌面版。'); }
+    else { openModelSettings(); setModelMessage('请先配置 DeepSeek API Key，再开始生成。', 'error'); }
+    return false;
+  }
+  if (!currentVideoSettings().configured) { openSeedanceSettings(); setSeedanceMessage('一键全流程需要先配置视频生成服务。', 'error'); return false; }
+  const ownerProject = project;
+  const pipeline = { ownerProject, projectId: ownerProject.id, inputScript: ownerProject.script,
+    stageSkills: structuredClone(normalizeGenerationSkills(ownerProject.generationSkills)),
+    generation: structuredClone(normalizeStoryboardGeneration(ownerProject.storyboardGeneration)), viewSequence: viewNavigationSequence };
+  autoPipelineRun = pipeline;
+  ownerProject.autoPipeline = { status: 'running', phase: 'checking', startedAt: Date.now(), finishedAt: null, error: '' };
+  ownerProject.running = true;
+  saveProject(); renderWithoutMovingPage();
+  try {
+    await refreshCodexImageStatus();
+    if (!isCurrentAutoPipelineRun(pipeline)) return false;
+    if (!isCodexImageReady()) throw Object.assign(new Error(codexImageStatus.error || '一键全流程需要可用的 GPT 订阅生图，请先检查 Codex 安装和 ChatGPT 登录。'), { autoConfig: 'images' });
+    for (const stage of ['outline', 'storyboard', 'assets']) {
+      if (!updateAutoPipelinePhase(pipeline, stage === 'assets' ? 'asset-prompts' : stage)) return false;
+      const completed = await startGeneration(false, { fullAuto: false, stage, pipelineRun: pipeline });
+      if (!isCurrentAutoPipelineRun(pipeline)) return false;
+      if (!completed) {
+        finishAutoPipeline(pipeline, 'failed', pipeline.ownerProject.workflowError || `${workflowStageLabel(stage)}未能启动，请检查生成配置。`);
+        return false;
+      }
+      if (stage === 'storyboard' && pipeline.ownerProject.outputs.storyboard?.auditSummary?.finalStatus === '部分通过（存在阻塞）') {
+        finishAutoPipeline(pipeline, 'failed', '分镜仍有未交付的阻塞内容，请先补充第二步所列信息。');
+        return false;
+      }
+    }
+    await continueAutoPipeline(pipeline);
+    return true;
+  } catch (error) {
+    finishAutoPipeline(pipeline, 'failed', cleanRemoteError(error, '全流程生成失败，已保留完成的成果'));
+    if (ownerProject === project && error.autoConfig === 'images') openCodexImageSettings();
+    return false;
+  }
+}
+
 async function rerunCurrentStage() {
+  if (backgroundGenerationBlocked()) return false;
   if (project.running) return showToast('当前生成任务进行中，请先完成或停止后再重新生成');
   if (project.activeStep === 'assets') return generateCodexImageAssets((project.outputs.assets?.promptItems || []).map((_item, index) => index));
   if (project.activeStep === 'video') return generateSeedanceVideos({ token: ++generationRun, force: true, mode: 'batch' });
   return startGeneration(true, { fullAuto: false });
 }
 
-async function startGeneration(retry = false, { fullAuto = project.autoRunToVideo === true } = {}) {
-  if (project.running) return showToast('当前生成任务进行中，请稍候或先停止');
-  if (project.activeStep === 'assets' && !fullAuto) return generateCodexImageAssets();
-  if (project.activeStep === 'video' && !fullAuto) return generateVideoStage(++generationRun, retry === 'force-video');
-  if (!project.script.trim()) { showToast('请先输入或导入一段剧本'); document.querySelector('#scriptInput')?.focus(); return; }
-  const storyboardSettings = structuredClone(normalizeStoryboardGeneration(project.storyboardGeneration));
+async function startGeneration(retry = false, { fullAuto = project.autoRunToVideo === true, stage = null, pipelineRun = null } = {}) {
+  const continuing = isCurrentAutoPipelineRun(pipelineRun);
+  const ownerProject = continuing ? pipelineRun.ownerProject : project;
+  if (!continuing && backgroundGenerationBlocked(ownerProject)) return false;
+  if (ownerProject.running && !continuing) return showToast('当前生成任务进行中，请稍候或先停止');
+  if (fullAuto) return startFullAutoGeneration();
+  if (!stage && project.activeStep === 'assets' && project.outputs.assets && !textStageDependencyError('video')) return generateCodexImageAssets();
+  if (!stage && project.activeStep === 'video') return generateVideoStage(++generationRun, retry === 'force-video');
+  stage = stage || (project.activeStep === 'storyboard' ? 'storyboard' : project.activeStep === 'assets' ? 'assets' : 'outline');
+  if (!['outline', 'storyboard', 'assets'].includes(stage)) return false;
+  const dependencyError = textStageDependencyError(stage, ownerProject);
+  if (dependencyError) { showToast(dependencyError); if (continuing) finishAutoPipeline(pipelineRun, 'failed', dependencyError); return false; }
+  if (!ownerProject.script.trim()) { showToast('请先输入或导入一段剧本'); document.querySelector('#scriptInput')?.focus(); return; }
+  const storyboardSettings = structuredClone(continuing ? pipelineRun.generation : normalizeStoryboardGeneration(ownerProject.storyboardGeneration));
   if (!window.storyforgeAI && storyboardSettings.provider === 'codex-subscription') { openCodexTextSettings(); showToast('GPT 订阅生成需要更新后的桌面版。'); return; }
   if (!window.storyforgeAI || (storyboardSettings.provider === 'deepseek' && !deepseekStatus.configured)) { openModelSettings(); setModelMessage('请先配置 DeepSeek API Key，再开始生成。', 'error'); return; }
   if (fullAuto && !currentVideoSettings().configured) { openSeedanceSettings(); setSeedanceMessage('一键全流程需要先配置视频生成服务。', 'error'); return; }
 
   const token = ++generationRun;
-  const ownerProject = project;
   const inputScript = ownerProject.script;
-  const stageSkills = structuredClone(normalizeGenerationSkills(ownerProject.generationSkills));
-  const pipeline = fullAuto ? { ownerProject, projectId: ownerProject.id, inputScript, stageSkills, viewSequence: viewNavigationSequence } : null;
-  autoPipelineRun = pipeline;
-  ownerProject.autoPipeline = pipeline ? { status: 'running', phase: 'checking', startedAt: Date.now(), finishedAt: null, error: '' } : null;
+  const stageSkills = structuredClone(continuing ? pipelineRun.stageSkills : normalizeGenerationSkills(ownerProject.generationSkills));
+  const pipeline = continuing ? pipelineRun : null;
+  if (!pipeline) { autoPipelineRun = null; ownerProject.autoPipeline = null; }
   const previousActiveStep = ownerProject.activeStep;
-  const isCurrentRun = () => token === generationRun && ownerProject === project;
-  const run = { ownerProject, token, runId: createProjectId(), projectId: ownerProject.id, stageSkills, generation: storyboardSettings, viewSequence: viewNavigationSequence, lastSequence: -1, lastSavedAt: Date.now(), lastPaintAt: 0, lastPhase: '' };
+  const isCurrentRun = () => token === generationRun && isRegisteredProject(ownerProject);
+  const run = { ownerProject, token, stage, inputScript, runId: createProjectId(), projectId: ownerProject.id, stageSkills, generation: storyboardSettings, viewSequence: viewNavigationSequence, lastSequence: -1, lastSavedAt: Date.now(), lastPaintAt: 0, lastPhase: '' };
   workflowRun = run;
   ownerProject.workflowProgress = createInitialWorkflowProgress({ runId: run.runId, projectId: run.projectId, inputChars: inputScript.length, ...resolveStoryboardGeneration(storyboardSettings) });
-  project.activeStep = 'analysis';
-  project.running = true;
-  project.workflowError = '';
-  saveProject(); renderWithoutMovingPage();
+  ownerProject.workflowProgressStage = stage;
+  ownerProject.workflowProgressAutomatic = Boolean(pipeline);
+  focusGenerationStep(workflowStepForStage(stage), run);
+  ownerProject.running = true;
+  ownerProject.workflowError = '';
+  saveProject(ownerProject); renderWithoutMovingPage();
   try {
     if (storyboardSettings.provider === 'codex-subscription') {
       await refreshCodexTextStatus();
@@ -3083,15 +3292,10 @@ async function startGeneration(retry = false, { fullAuto = project.autoRunToVide
       const selected = resolveStoryboardGeneration(storyboardSettings);
       if (selected.error) throw Object.assign(new Error(selected.error), { autoConfig: 'storyboard' });
       run.generation = { provider: selected.provider, model: selected.model, reasoningEffort: selected.reasoningEffort };
+      if (pipeline) pipeline.generation = { ...run.generation };
       ownerProject.storyboardGeneration = { ...run.generation };
       ownerProject.workflowProgress = createInitialWorkflowProgress({ runId: run.runId, projectId: run.projectId, inputChars: inputScript.length, ...run.generation });
       persistWorkflowProgress(ownerProject); updateWorkflowProgressPanel(); updateCodexTextStatusView();
-    }
-    if (pipeline) {
-      await refreshCodexImageStatus();
-      if (!isCurrentRun() || !isCurrentAutoPipelineRun(pipeline)) return;
-      if (!isCodexImageReady()) throw Object.assign(new Error(codexImageStatus.error || '一键全流程需要可用的 GPT 订阅生图，请先检查 Codex 安装和 ChatGPT 登录。'), { autoConfig: 'images' });
-      if (!updateAutoPipelinePhase(pipeline, 'storyboard')) return;
     }
     run.unsubscribe = window.storyforgeAI.onWorkflowProgress?.((value) => {
       if (!isCurrentRun() || workflowRun !== run) return;
@@ -3114,42 +3318,37 @@ async function startGeneration(retry = false, { fullAuto = project.autoRunToVide
     run.timer = window.setInterval?.(() => {
       if (isCurrentRun() && workflowRun === run) updateWorkflowProgressPanel();
     }, 1000);
-    const response = await window.storyforgeAI.generateWorkflow(inputScript, { runId: run.runId, projectId: run.projectId, stageSkills, ...(run.generation.provider === 'codex-subscription' ? run.generation : {}), ...(pipeline ? { autoRunToVideo: true } : {}) });
+    const response = await window.storyforgeAI.generateWorkflow(inputScript, { runId: run.runId, projectId: run.projectId, stage, stageSkills, ...(stage === 'storyboard' ? { confirmedOutline: structuredClone(currentStoryboardOutline(ownerProject)) } : stage === 'assets' ? { confirmedStoryboard: confirmedStoryboardInput(ownerProject) } : {}), ...(run.generation.provider === 'codex-subscription' ? run.generation : {}), ...(pipeline ? { autoRunToVideo: true } : {}) });
     if (!isCurrentRun()) return;
     const returnedProgress = normalizeWorkflowProgress(response.progress);
     if (returnedProgress && (!returnedProgress.runId || returnedProgress.runId === run.runId) && (!returnedProgress.projectId || returnedProgress.projectId === run.projectId)
       && returnedProgress.sequence >= run.lastSequence) ownerProject.workflowProgress = { ...returnedProgress, runId: run.runId, projectId: run.projectId };
     if (ownerProject.script !== inputScript) throw new Error('生成期间剧本文本已更改，请根据最新剧本重新生成。');
-    const outputs = renderAIWorkflow(response.data, response.usage, response.model, run.generation);
-    const partial = outputs.storyboard.auditSummary?.finalStatus === '部分通过（存在阻塞）';
-    const auditIgnored = outputs.storyboard.auditSummary?.finalStatus === '审计未通过（已忽略）';
-    const assetGeneration = createAssetGenerationState(outputs.assets.promptItems || []);
-    const videoGeneration = { ...defaultProject.videoGeneration, items: [] };
-    const aiGeneration = { provider: run.generation.provider, model: response.model || run.generation.model || 'deepseek-flash', reasoningEffort: response.reasoningEffort || run.generation.reasoningEffort || 'high', usage: response.usage || null, generatedAt: new Date().toISOString() };
-    // Replace confirmed state only once every output has been prepared successfully.
+    const output = renderGeneratedTextStage(response, stage, run);
+    const stepId = workflowStepForStage(stage);
+    const partial = stage === 'storyboard' && output.auditSummary?.finalStatus === '部分通过（存在阻塞）';
+    const auditIgnored = stage === 'storyboard' && output.auditSummary?.finalStatus === '审计未通过（已忽略）';
+    const completed = ownerProject.completed.filter(id => stage === 'outline' ? id === 'analysis' : stage === 'storyboard' ? ['analysis', 'storyboard'].includes(id) : id !== 'video');
+    if (!partial && !completed.includes(stepId) && stage !== 'assets') completed.push(stepId);
+    if (partial) { const index = completed.indexOf('storyboard'); if (index >= 0) completed.splice(index, 1); }
     Object.assign(ownerProject, {
-      outputs,
-      completed: partial ? ['analysis'] : ['analysis', 'storyboard'],
-      assetGeneration,
-      videoGeneration,
-      aiGeneration,
-      activeStep: run.viewSequence === viewNavigationSequence ? partial ? 'storyboard' : 'assets' : ownerProject.activeStep,
-      running: false,
-      workflowError: '',
+      outputs: { ...ownerProject.outputs, [stepId]: output }, completed,
+      aiGeneration: { provider: run.generation.provider, model: response.model || run.generation.model || 'deepseek-flash', reasoningEffort: response.reasoningEffort || run.generation.reasoningEffort || 'high', usage: response.usage || null, generatedAt: new Date().toISOString() },
+      running: false, workflowError: '',
     });
+    if (stage === 'storyboard') invalidateVideosForStoryboard(ownerProject);
+    if (stage === 'assets') alignAssetGenerationItems(output.promptItems || [], ownerProject);
     if (ownerProject.workflowProgress?.status === 'running') ownerProject.workflowProgress = finishWorkflowProgress(ownerProject.workflowProgress, 'completed');
-    if (auditIgnored && ownerProject.workflowProgress) ownerProject.workflowProgress = normalizeWorkflowProgress({ ...ownerProject.workflowProgress, auditIgnored: true, repairCount: outputs.storyboard.auditSummary.repairCount });
+    if (auditIgnored && ownerProject.workflowProgress) ownerProject.workflowProgress = normalizeWorkflowProgress({ ...ownerProject.workflowProgress, auditIgnored: true, repairCount: output.auditSummary.repairCount });
     workflowRun = null;
-    saveProject(); renderWithoutMovingPage();
-    if (pipeline) {
-      releaseWorkflowProgress(run);
-      await continueAutoPipeline(pipeline);
-    } else showToast(partial ? '已交付独立通过审计的生成块；受阻范围与所缺信息见第二步审计结果' : auditIgnored ? '已自动回炉一次，审计未通过已忽略；请在第三步生成或上传参考图' : storyboardUsesCustomSkill(outputs.storyboard) ? '分镜已按用户 Skill 完成文本审计，请在第三步生成或上传参考图' : '分镜已通过 Skill v2.1 文本审计，请在第三步生成或上传参考图');
+    saveProject(ownerProject); renderWithoutMovingPage();
+    if (!pipeline) showToast(partial ? '已交付独立通过审计的生成块，请查看阻塞信息；等待你确认后继续。' : `${workflowStageLabel(stage)}已生成，等待你确认后继续。`);
+    return true;
   } catch (error) {
     if (!isCurrentRun()) return;
     const message = cleanRemoteError(error, `${storyboardProviderLabel(run.generation)} 生成失败`);
     ownerProject.running = false;
-    if (run.viewSequence === viewNavigationSequence) ownerProject.activeStep = previousActiveStep;
+    if (ownerProject === project && run.viewSequence === viewNavigationSequence) ownerProject.activeStep = previousActiveStep;
     ownerProject.workflowError = message;
     ownerProject.workflowProgress = finishWorkflowProgress(ownerProject.workflowProgress, 'failed', message);
     workflowRun = null;
@@ -3157,16 +3356,17 @@ async function startGeneration(retry = false, { fullAuto = project.autoRunToVide
       ownerProject.autoPipeline = { ...ownerProject.autoPipeline, status: 'failed', error: message, finishedAt: Date.now() };
       autoPipelineRun = null;
     }
-    saveProject(); renderWithoutMovingPage();
+    saveProject(ownerProject); renderWithoutMovingPage();
     showToast(message);
-    if (error.autoConfig === 'images') openCodexImageSettings();
-    else if (error.autoConfig === 'storyboard') openCodexTextSettings();
-    else if (run.generation.provider === 'codex-subscription' && /登录|身份验证|鉴权|authentication|unauthorized|\b401\b/i.test(message)) openCodexTextSettings();
-    else if (run.generation.provider !== 'codex-subscription' && /API Key|密钥|身份验证|鉴权|authentication|unauthorized|\b401\b/i.test(message)) {
+    if (ownerProject === project && error.autoConfig === 'images') openCodexImageSettings();
+    else if (ownerProject === project && error.autoConfig === 'storyboard') openCodexTextSettings();
+    else if (ownerProject === project && run.generation.provider === 'codex-subscription' && /登录|身份验证|鉴权|authentication|unauthorized|\b401\b/i.test(message)) openCodexTextSettings();
+    else if (ownerProject === project && run.generation.provider !== 'codex-subscription' && /API Key|密钥|身份验证|鉴权|authentication|unauthorized|\b401\b/i.test(message)) {
       window.setTimeout(() => {
         if (ownerProject === project && token === generationRun) { openModelSettings(); setModelMessage(message, 'error'); }
       }, 100);
     }
+    return false;
   } finally {
     releaseWorkflowProgress(run);
   }
@@ -3188,6 +3388,38 @@ function legacyVideoVersion(item) {
 function getSelectedVideoVersion(item) {
   const versions = Array.isArray(item?.versions) ? item.versions.filter((version) => typeof version?.localPath === 'string' && version.localPath.trim()) : [];
   return versions.find((version) => version.id === item.selectedVersionId) || versions[versions.length - 1] || legacyVideoVersion(item);
+}
+
+function videoItemIsComplete(item) {
+  return item?.needsGeneration !== true && Boolean(getSelectedVideoVersion(item));
+}
+
+function invalidateVideosForStoryboard(ownerProject) {
+  const state = ownerProject.videoGeneration || structuredClone(defaultProject.videoGeneration);
+  const items = Array.isArray(state.items) ? state.items : [];
+  const prompts = ownerProject.outputs.storyboard?.prompts || [];
+  // Preserve removed-block history in project exports when a new outline has
+  // fewer blocks; the current items remain aligned with the new storyboard.
+  if (items.length > prompts.length) {
+    state.storyboardHistory = [...(Array.isArray(state.storyboardHistory) ? state.storyboardHistory : []), {
+      savedAt: new Date().toISOString(), items: structuredClone(items),
+    }];
+  }
+  state.items = items.map((savedItem, index) => {
+    const item = normalizeVideoItemVersions(savedItem);
+    delete item.promptOverride;
+    delete item.promptEditedAt;
+    delete item.originalReferenceUploads;
+    delete item.referenceFormat;
+    return { ...item, needsGeneration: true, status: 'pending', taskId: '', taskProvider: '', taskMetadata: null,
+      referenceBindings: {}, error: '', ...(prompts[index] ? { duration: storyboardShotDuration(index, prompts[index], state.duration, ownerProject) } : {}) };
+  });
+  state.status = 'pending';
+  state.generatedCount = 0;
+  state.lastError = '';
+  state.pendingCertification = null;
+  ownerProject.videoGeneration = state;
+  ownerProject.completed = ownerProject.completed.filter(id => id !== 'video');
 }
 
 function normalizeVideoItemVersions(savedItem) {
@@ -3229,7 +3461,7 @@ function appendVideoVersion(savedItem, saved, metadata = {}) {
   const pathKey = saved.localPath.replaceAll('\\', '/').toLowerCase();
   const existing = item.versions.find((version) => version.localPath.replaceAll('\\', '/').toLowerCase() === pathKey
     || (metadata.taskId && version.taskId === metadata.taskId));
-  if (existing) return { ...item, status: 'success', error: '', selectedVersionId: existing.id };
+  if (existing) return { ...item, status: 'success', needsGeneration: false, error: '', selectedVersionId: existing.id };
   const number = item.versions.length + 1;
   const idBase = metadata.taskId ? `video-task-${metadata.taskId}` : `video-version-${number}`;
   const id = item.versions.some((version) => version.id === idBase) ? `${idBase}-${number}` : idBase;
@@ -3249,20 +3481,20 @@ function appendVideoVersion(savedItem, saved, metadata = {}) {
   return {
     ...item, ...saved, ...latestFields,
     versions: [...item.versions, version], selectedVersionId: id,
-    status: 'success', error: '',
+    status: 'success', needsGeneration: false, error: '',
   };
 }
 
-function initializeVideoGeneration(prompts) {
-  project.videoGeneration = {
+function initializeVideoGeneration(prompts, ownerProject = project) {
+  ownerProject.videoGeneration = {
     status: 'pending',
-    provider: activeVideoProvider(),
-    model: currentVideoSettings().model,
-    ratio: currentVideoSettings().ratio,
-    resolution: currentVideoSettings().resolution,
-    duration: currentVideoSettings().duration,
-    generationMode: normalizeSeedanceGenerationMode(currentVideoSettings().generationMode),
-    generateAudio: currentVideoSettings().generateAudio,
+    provider: activeVideoProvider(ownerProject),
+    model: currentVideoSettings(ownerProject).model,
+    ratio: currentVideoSettings(ownerProject).ratio,
+    resolution: currentVideoSettings(ownerProject).resolution,
+    duration: currentVideoSettings(ownerProject).duration,
+    generationMode: normalizeSeedanceGenerationMode(currentVideoSettings(ownerProject).generationMode),
+    generateAudio: currentVideoSettings(ownerProject).generateAudio,
     outputDirectory: '',
     generatedCount: 0,
     totalCount: prompts.length,
@@ -3270,7 +3502,7 @@ function initializeVideoGeneration(prompts) {
     pendingCertification: null,
     items: prompts.map((prompt, index) => ({
       fileName: `镜头-${String(index + 1).padStart(2, '0')}.mp4`,
-      duration: storyboardShotDuration(index, prompt, currentVideoSettings().duration),
+      duration: storyboardShotDuration(index, prompt, currentVideoSettings(ownerProject).duration, ownerProject),
       status: 'pending',
       taskId: '',
       localPath: '',
@@ -3281,16 +3513,17 @@ function initializeVideoGeneration(prompts) {
       selectedVersionId: '',
     })),
   };
-  return project.videoGeneration;
+  return ownerProject.videoGeneration;
 }
 
-function alignVideoGenerationItems(prompts) {
-  const state = project.videoGeneration || initializeVideoGeneration(prompts);
+function alignVideoGenerationItems(prompts, ownerProject = project) {
+  const state = ownerProject.videoGeneration || initializeVideoGeneration(prompts, ownerProject);
   const current = Array.isArray(state.items) ? state.items : [];
   state.items = prompts.map((prompt, index) => normalizeVideoItemVersions({
     fileName: current[index]?.fileName || `镜头-${String(index + 1).padStart(2, '0')}.mp4`,
-    duration: videoItemDuration(index, prompt, current[index], current[index]?.status === 'success' ? state.duration : state.duration || seedanceStatus.duration),
-    status: current[index]?.status || 'pending',
+    duration: videoItemDuration(index, prompt, current[index], current[index]?.status === 'success' ? state.duration : state.duration || seedanceStatus.duration, ownerProject),
+    status: current[index]?.needsGeneration === true ? 'pending' : current[index]?.status || 'pending',
+    needsGeneration: current[index]?.needsGeneration === true,
     taskId: current[index]?.taskId || '',
     taskProvider: current[index]?.taskProvider || '',
     taskMetadata: current[index]?.taskMetadata || null,
@@ -3309,22 +3542,22 @@ function alignVideoGenerationItems(prompts) {
     ...(current[index]?.promptEditedAt ? { promptEditedAt: current[index].promptEditedAt } : {}),
   }));
   state.totalCount = prompts.length;
-  state.generatedCount = state.items.filter((item) => getSelectedVideoVersion(item)).length;
-  project.videoGeneration = state;
-  reconcilePortraitCertification(state);
+  state.generatedCount = state.items.filter((item) => videoItemIsComplete(item)).length;
+  ownerProject.videoGeneration = state;
+  reconcilePortraitCertification(state, ownerProject);
   return state;
 }
 
-function prepareSeedancePrompt(prompt, shotIndex) {
-  const shot = project.outputs.storyboard?.shots?.[shotIndex] || {};
-  const item = project.videoGeneration?.items?.[shotIndex] || {};
-  const build = activeVideoProvider() === 'comfy' ? buildH3ReferenceRequest : buildSeedanceReferenceRequest;
+function prepareSeedancePrompt(prompt, shotIndex, ownerProject = project) {
+  const shot = ownerProject.outputs.storyboard?.shots?.[shotIndex] || {};
+  const item = ownerProject.videoGeneration?.items?.[shotIndex] || {};
+  const build = activeVideoProvider(ownerProject) === 'comfy' ? buildH3ReferenceRequest : buildSeedanceReferenceRequest;
   return build({
     prompt,
     shot,
-    assetItems: project.assetGeneration?.items || [],
+    assetItems: ownerProject.assetGeneration?.items || [],
     savedBindings: item.referenceBindings || {},
-    unifiedSuffix: project.outputs.storyboard?.unifiedSuffix || '',
+    unifiedSuffix: ownerProject.outputs.storyboard?.unifiedSuffix || '',
   });
 }
 
@@ -3346,7 +3579,7 @@ function blockedPortraitInputs(message, prepared) {
 }
 
 async function pollSeedanceTask(taskId, token, state, index, ownerProject = project) {
-  const isCurrent = () => token === generationRun && project === ownerProject && ownerProject.videoGeneration === state;
+  const isCurrent = () => token === generationRun && isRegisteredProject(ownerProject) && ownerProject.videoGeneration === state;
   let transientFailures = 0;
   const comfy = state.provider === 'comfy';
   for (let attempt = 0; attempt < (comfy ? 720 : 180); attempt += 1) {
@@ -3360,7 +3593,7 @@ async function pollSeedanceTask(taskId, token, state, index, ownerProject = proj
       const remoteStatus = task.status === 'pending' ? 'queued' : task.status;
       const displayStatus = ['succeeded', 'success'].includes(remoteStatus) ? 'downloading' : remoteStatus;
       state.items[index] = { ...state.items[index], status: displayStatus, remoteVideoUrl: task.videoUrl || '', usage: task.usage || null };
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       if (remoteStatus === 'succeeded' || (remoteStatus === 'success' && task.videoUrl)) return task;
       if (remoteStatus === 'failed') { const error = new Error(task.error || '视频任务失败。'); error.terminal = true; throw error; }
     } catch (error) {
@@ -3372,26 +3605,31 @@ async function pollSeedanceTask(taskId, token, state, index, ownerProject = proj
   throw new Error(comfy ? 'H3 等待超过2小时，任务编号已保留，可稍后继续查询。' : 'Seedance 视频任务等待超过 30 分钟，请稍后重试或到火山方舟控制台查看。');
 }
 
-async function generateSeedanceVideos({ token, indexes = null, force = false, mode = null, stopOnFailure = false, pipelineRun = null, viewSequence = viewNavigationSequence }) {
-  const ownerProject = project;
-  const videoFocus = pipelineRun || { ownerProject: project, viewSequence };
-  const prompts = project.outputs.storyboard?.prompts || [];
+async function generateSeedanceVideos({ token, indexes = null, force = false, mode = null, stopOnFailure = false, pipelineRun = null, viewSequence = viewNavigationSequence, ownerProject = pipelineRun?.ownerProject || project }) {
+  if (token === null || backgroundGenerationBlocked(ownerProject)) return;
+  if (videoRun || (ownerProject.running && !isCurrentAutoPipelineRun(pipelineRun))) return showToast('当前生成任务进行中，请稍候或先停止');
+  if (ownerProject.outputs.storyboard?.revision) {
+    const stale = textStageDependencyError('video', ownerProject);
+    if (stale) return showToast(stale);
+  }
+  const videoFocus = pipelineRun || { ownerProject: ownerProject, viewSequence };
+  const prompts = ownerProject.outputs.storyboard?.prompts || [];
   if (!prompts.length) return showToast('第二步还没有可生成的视频分镜');
-  const provider = activeVideoProvider();
-  const settings = { ...currentVideoSettings() };
+  const provider = activeVideoProvider(ownerProject);
+  const settings = { ...currentVideoSettings(ownerProject) };
   const comfy = provider === 'comfy';
   if (!window.storyforgeAI || !settings.configured || (comfy && !window.storyforgeAI.createComfyVideoTask)) {
-    project.running = false;
+    ownerProject.running = false;
     focusGenerationStep('video', videoFocus);
-    saveProject(); renderWithoutMovingPage();
-    openSeedanceSettings();
+    saveProject(ownerProject); renderWithoutMovingPage();
+    if (ownerProject === project) openSeedanceSettings();
     if (comfy) setComfyVideoMessage('请先配置仙宫云 ComfyUI 访问地址。', 'error');
     else setSeedanceMessage('请先配置火山方舟 API Key。保存后即可开始第四步。', 'error');
     return;
   }
-  if (!project.outputs.video) project.outputs.video = makeOutput('video');
-  const state = alignVideoGenerationItems(prompts);
-  const isCurrent = () => token === generationRun && project === ownerProject && ownerProject.videoGeneration === state;
+  if (!ownerProject.outputs.video) ownerProject.outputs.video = { title: videoOutputTitle(activeVideoProvider(ownerProject)), subtitle: '按第二步分镜逐条生成并保存 MP4', time: '数分钟 / 镜头', body: '' };
+  const state = alignVideoGenerationItems(prompts, ownerProject);
+  const isCurrent = () => token === generationRun && isRegisteredProject(ownerProject) && ownerProject.videoGeneration === state;
   state.provider = provider;
   state.model = settings.model || (comfy ? 'MiniMax-H3-Base-Ref2VA' : SEEDANCE_DEFAULT_MODEL);
   state.ratio = settings.ratio;
@@ -3404,27 +3642,27 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
   if (!selection.candidates.length) return showToast('所有分镜视频都已经生成');
   const emptyPromptIndex = selection.requested.find((index) => !effectiveVideoPrompt(index, prompts[index], state).trim());
   if (Number.isInteger(emptyPromptIndex)) return showToast(`镜头 ${String(emptyPromptIndex + 1).padStart(2, '0')} 的视频生成提示词不能为空`);
-  const shortBlockIndexes = storyboardUsesSkill21() ? selection.requested.filter((index) => storyboardShotDuration(index, prompts[index], state.duration) < 4) : [];
+  const shortBlockIndexes = storyboardUsesSkill21(ownerProject.outputs.storyboard) ? selection.requested.filter((index) => storyboardShotDuration(index, prompts[index], state.duration, ownerProject) < 4) : [];
   if (shortBlockIndexes.length) {
-    project.running = false;
+    ownerProject.running = false;
     focusGenerationStep('video', videoFocus);
-    state.lastError = `生成块 ${shortBlockIndexes.map((index) => String(project.outputs.storyboard.shots?.[index]?.no || index + 1).padStart(2, '0')).join('、')} 的自然时长不足4秒。${videoServiceLabel(provider)} 当前仅接受4—15秒，请按 Skill 合理重分块并重新审计后再生成；程序不会自动补空镜、加速或拉长。`;
-    saveProject(); renderWithoutMovingPage();
+    state.lastError = `生成块 ${shortBlockIndexes.map((index) => String(ownerProject.outputs.storyboard.shots?.[index]?.no || index + 1).padStart(2, '0')).join('、')} 的自然时长不足4秒。${videoServiceLabel(provider)} 当前仅接受4—15秒，请按 Skill 合理重分块并重新审计后再生成；程序不会自动补空镜、加速或拉长。`;
+    saveProject(ownerProject); renderWithoutMovingPage();
     return showToast(state.lastError);
   }
   for (const index of selection.requested) {
     const prompt = effectiveVideoPrompt(index, prompts[index], state);
     const plan = resolveStrictReferencePlan({
       prompt,
-      shot: project.outputs.storyboard?.shots?.[index] || {},
-      assetItems: project.assetGeneration?.items || [],
+      shot: ownerProject.outputs.storyboard?.shots?.[index] || {},
+      assetItems: ownerProject.assetGeneration?.items || [],
       savedBindings: state.items[index]?.referenceBindings || {},
     });
     if (!plan.valid) {
-      project.running = false;
+      ownerProject.running = false;
       focusGenerationStep('video', videoFocus);
       state.lastError = `镜头 ${String(index + 1).padStart(2, '0')}：${plan.errors[0] || '参考图绑定不完整。'}`;
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       showToast(state.lastError);
       return;
     }
@@ -3432,18 +3670,19 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
   if (state.pendingCertification && selection.requested.includes(Number(state.pendingCertification.shotIndex))) {
     const rejectedItem = state.items[Number(state.pendingCertification.shotIndex)];
     state.pendingCertification = null;
-    resetVideoItemAfterReferenceChange(rejectedItem, state);
+    resetVideoItemAfterReferenceChange(rejectedItem, state, ownerProject);
   }
   if (force) {
     for (const index of selection.reset) state.items[index] = { ...state.items[index], status: 'pending', taskId: '', error: '' };
   }
   const requested = selection.requested;
-  if (!state.items.length || state.items.some((item) => !getSelectedVideoVersion(item))) project.completed = project.completed.filter((id) => id !== 'video');
+  if (!state.items.length || state.items.some((item) => !videoItemIsComplete(item))) ownerProject.completed = ownerProject.completed.filter((id) => id !== 'video');
   focusGenerationStep('video', videoFocus);
-  project.running = true;
+  ownerProject.running = true;
+  videoRun = { ownerProject, token, projectId: ownerProject.id };
   state.status = 'running';
-  if (!pipelineRun) project.autoPipeline = null;
-  saveProject(); renderWithoutMovingPage();
+  if (!pipelineRun) ownerProject.autoPipeline = null;
+  saveProject(ownerProject); renderWithoutMovingPage();
 
   let certificationTriggered = false;
   for (let requestPosition = 0; requestPosition < requested.length; requestPosition += 1) {
@@ -3451,9 +3690,9 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
     if (!isCurrent()) return;
     const promptForGeneration = effectiveVideoPrompt(index, prompts[index], state);
     let prepared;
-    const duration = storyboardShotDuration(index, prompts[index], state.duration);
+    const duration = storyboardShotDuration(index, prompts[index], state.duration, ownerProject);
     try {
-      prepared = prepareSeedancePrompt(promptForGeneration, index);
+      prepared = prepareSeedancePrompt(promptForGeneration, index, ownerProject);
       const requestMetadata = {
         provider, model: state.model, ratio: state.ratio, resolution: state.resolution,
         generateAudio: state.generateAudio, duration, prompt: prepared.prompt,
@@ -3464,7 +3703,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
       // Save a known handle before crossing IPC. A stopped/reloaded UI must not
       // submit a second task just because the first submission response is late.
       state.items[index] = { ...previousTask, duration, status: 'creating', taskId: handle, taskProvider: provider, taskMetadata: comfy ? (resume ? previousTask.taskMetadata : requestMetadata) : null, error: '' };
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       const create = comfy ? window.storyforgeAI.createComfyVideoTask : window.storyforgeAI.createSeedanceTask;
       const created = resume ? { id: previousTask.taskId, status: 'queued' } : await create({
         ...(comfy ? { taskId: handle } : {}),
@@ -3483,11 +3722,11 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
       }
       if (!isCurrent()) return;
       state.items[index] = { ...state.items[index], status: created.status === 'running' ? 'running' : 'queued', taskId: created.id };
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       const task = await pollSeedanceTask(created.id, token, state, index, ownerProject);
       if (!task || !isCurrent()) return;
       state.items[index] = { ...state.items[index], status: 'downloading', remoteVideoUrl: task.videoUrl };
-      saveProject(); renderWithoutMovingPage();
+      saveProject(ownerProject); renderWithoutMovingPage();
       const download = comfy ? window.storyforgeAI.downloadComfyVideo : window.storyforgeAI.downloadSeedanceVideo;
       const saved = await download({
         taskId: created.id,
@@ -3523,19 +3762,20 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
         if (/尚未开通|API Key 无效|没有.*权限|额度不足|余额不足/.test(message)) state.lastError = message;
       }
     }
-    state.generatedCount = state.items.filter((item) => getSelectedVideoVersion(item)).length;
-    saveProject(); renderWithoutMovingPage();
+    state.generatedCount = state.items.filter((item) => videoItemIsComplete(item)).length;
+    saveProject(ownerProject); renderWithoutMovingPage();
     if (state.lastError || certificationTriggered || (stopOnFailure && state.items[index]?.status === 'failed')) break;
   }
 
   if (!isCurrent()) return;
   const failed = state.items.filter((item) => item.status === 'failed').length;
-  const allComplete = state.items.length === prompts.length && state.items.every((item) => getSelectedVideoVersion(item));
+  const allComplete = state.items.length === prompts.length && state.items.every((item) => videoItemIsComplete(item));
   state.status = certificationTriggered ? 'awaiting-certification' : failed ? 'partial' : allComplete ? 'complete' : state.generationMode === 'confirm' ? 'awaiting-confirmation' : 'pending';
-  state.generatedCount = state.items.filter((item) => getSelectedVideoVersion(item)).length;
-  project.running = false;
-  if (allComplete && !project.completed.includes('video')) project.completed.push('video');
-  saveProject(); renderWithoutMovingPage();
+  state.generatedCount = state.items.filter((item) => videoItemIsComplete(item)).length;
+  ownerProject.running = false;
+  if (videoRun?.ownerProject === ownerProject && videoRun.token === token) videoRun = null;
+  if (allComplete && !ownerProject.completed.includes('video')) ownerProject.completed.push('video');
+  saveProject(ownerProject); renderWithoutMovingPage();
   const generatedIndex = requested[requested.length - 1];
   const nextIndex = state.items.findIndex((item) => item.status !== 'success');
   const resultMessage = allComplete && !failed && !certificationTriggered
@@ -3547,7 +3787,7 @@ async function generateSeedanceVideos({ token, indexes = null, force = false, mo
         ? `镜头 ${String(generatedIndex + 1).padStart(2, '0')} 已保存，请确认后生成镜头 ${String(nextIndex + 1).padStart(2, '0')}`
         : `已生成 ${state.generatedCount} 个，${failed} 个失败，可单独重试`);
   showToast(resultMessage);
-  if (certificationTriggered && project.activeStep === 'video') openPortraitCertificationModal();
+  if (certificationTriggered && ownerProject === project && ownerProject.activeStep === 'video') openPortraitCertificationModal();
 }
 
 async function generateVideoStage(token, force = false) {

@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld('storyforgeAI', {
   getStatus: () => ipcRenderer.invoke('deepseek:get-status'),
   saveKey: (apiKey) => ipcRenderer.invoke('deepseek:save-key', apiKey),
   testConnection: (apiKey) => ipcRenderer.invoke('deepseek:test', apiKey),
-  generateWorkflow: (script, run = {}) => ipcRenderer.invoke('deepseek:generate-workflow', script, { runId: run.runId, projectId: run.projectId, stageSkills: run.stageSkills, autoRunToVideo: run.autoRunToVideo, provider: run.provider, model: run.model, reasoningEffort: run.reasoningEffort }),
+  generateWorkflow: (script, run = {}) => ipcRenderer.invoke('deepseek:generate-workflow', script, { runId: run.runId, projectId: run.projectId, stageSkills: run.stageSkills, autoRunToVideo: run.autoRunToVideo, provider: run.provider, model: run.model, reasoningEffort: run.reasoningEffort, stage: run.stage, confirmedOutline: run.confirmedOutline, confirmedStoryboard: run.confirmedStoryboard }),
   cancelWorkflow: (run = {}) => ipcRenderer.invoke('deepseek:cancel-workflow', { runId: run.runId, projectId: run.projectId }),
   getCodexTextStatus: () => ipcRenderer.invoke('codex-text:get-status'),
   chooseCodexTextCli: () => ipcRenderer.invoke('codex-text:choose-cli'),

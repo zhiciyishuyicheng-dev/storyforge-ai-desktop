@@ -2,7 +2,7 @@
   "name": "story-to-screen-studio",
   "productName": "XStudio",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -23,7 +23,7 @@
     "appId": "com.storyforge.desktop",
     "productName": "XStudio",
     "directories": {
-      "output": "release-v1.1.0"
+      "output": "release-v1.1.1"
     },
     "files": [
       "dist/**/*",
